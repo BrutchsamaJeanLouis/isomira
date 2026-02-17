@@ -948,7 +948,16 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
         log(f"Test output:\n{test_result['output'][:4000]}")
 
         # -- STUCK LOOP DETECTION --
-        test_hash = hashlib.md5(test_result["output"].encode()).hexdigest()
+        # Hash the PASS/FAIL pattern, not raw output.
+        # Raw output contains memory addresses that change per run,
+        # defeating hash comparison even when results are identical.
+        pf_pattern = []
+        for line in test_result["output"].split("\n"):
+            if "PASSED" in line:
+                pf_pattern.append("P")
+            elif "FAILED" in line and "::" in line:
+                pf_pattern.append("F")
+        test_hash = hashlib.md5("".join(pf_pattern).encode()).hexdigest()
         if test_hash == last_test_hash:
             stuck_count += 1
         else:

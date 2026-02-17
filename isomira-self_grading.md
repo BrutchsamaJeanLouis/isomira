@@ -167,13 +167,43 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 - Stuck loop detection works but the threshold (3) may be too low for tasks that need creative leaps.
 - Models at temp 0.15 are near-deterministic. Identical prompts = identical outputs. Stuck means STUCK.
 
-### QIWM Phase 1: ToyWorld -- PENDING
+**New lessons from QIWM run 1:**
+- Formulas without conceptual shape = reversed expectations. DK must provide the topology (what the field LOOKS LIKE), not just the equations.
+- Stuck detection must hash structural patterns, not raw output. Memory addresses in pytest output change per run.
+- When Devstral is correct from iteration 1 but tests are wrong, the review model blames the implementation instead of the tests. The review prompt frames failures as implementation bugs, creating a blind spot for test bugs.
+- Superposition rules need explicit numeric examples showing the combined value, not just "contributions sum."
+
+### QIWM Phase 1: ToyWorld
 
 | Run | Tests | Best Pass Rate | Iterations | Outcome | Key Issue |
 |-----|-------|---------------|------------|---------|-----------|
-| 1 | ? | ? | ? | ? | ? |
+| 1 | 10 | 6/10 | 17 (killed) | FAIL | 4 wrong tests: reversed inequality (x2), obstacle ignores superposition, test bypasses public API via _potential |
 
-_(Fill in after run)_
+**Run 1 scores:**
+| Dimension | Score | Notes |
+|-----------|-------|-------|
+| Convergence Speed | 0/10 | Never converged. 17 iterations, same 4 failures throughout. |
+| Test Quality | 2/10 | 4/10 tests wrong. Reversed potential comparisons (adjacent < source), obstacle test ignores energy contribution, gradient test sets _potential bypassing compute. |
+| Implementation Quality | 9/10 | Devstral correct from iteration 1. Clean numpy, proper boundary handling, correct formula. |
+| Orchestrator Behavior | 3/10 | Stuck detection never fired (memory addresses in pytest output defeat MD5 hash). Review diagnosed wrong (blamed implementation, not tests). Test protection fired correctly 4 times. |
+| Agent Disambiguation | 10/10 | No agent code leaked. Pure environment class. |
+| **Total** | **24/50** | Below 38/50 threshold. |
+
+**Root cause analysis:**
+- DK had formulas but no conceptual shape (field landscape / well topology)
+- Ministral couldn't decompress formulas into correct inequality directions without the shape anchor
+- Obstacle superposition stated but not reinforced with explicit "1000 + negative != exactly 1000"
+- get_gradient spec said "computed from scratch each call" but test tried to bypass via _potential
+- Boundary gradient formula ambiguous (divisor unspecified for forward/backward difference)
+- Stuck detection completely blind due to changing memory addresses in pytest output
+
+**Fixes applied for run 2:**
+- task.md: Added "CRITICAL -- Field Shape" section with explicit numeric examples and inequality direction
+- task.md: Clarified obstacle stacking ("1000.0 + negative energy contribution, which is LESS than 1000.0")
+- task.md: Changed interface to store field as self.potential (public), get_gradient reads from it
+- task.md: Specified boundary formulas explicitly with /1.0 divisor
+- task.md: Added constraint "Tests must only interact through public methods and public attributes"
+- isomoira.py: Stuck detection now hashes PASS/FAIL pattern (P/F per test line) not raw output
 
 ---
 
