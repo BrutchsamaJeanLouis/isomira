@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Isomoira -- Dual-model TDD orchestrator.
-Phase A: Walking skeleton. One file. One loop. Tests decide when it's done.
+Phases A-D complete. One file. One loop. Tests decide when it's done.
+Phase B: Command sandboxing (write-path, sudo allowlist, foreground blocking).
 """
 
 import ast
@@ -336,14 +337,170 @@ def normalize_plan(plan: list, fallback_file: str = "") -> list:
 
 
 # ---------------------------------------------
-# COMMAND EXECUTOR (Phase A: minimal, no sandbox)
+# COMMAND EXECUTOR (Phase B: sandboxed)
 # ---------------------------------------------
+
+# Sudo subcommands that are safe for unattended use.
+# Anything not on this list gets blocked.
+SUDO_ALLOWLIST = frozenset({
+    "apt", "apt-get", "dpkg",
+    "systemctl", "service",
+    "kill", "killall", "pkill",
+    "lsof", "fuser",
+    "ufw",
+    "netstat", "ss",
+})
+
+# Commands/patterns that run forever or require interactive input.
+# Block these unconditionally.
+FOREGROUND_PATTERNS = [
+    r"\btail\s+-f\b",
+    r"\bwatch\b",
+    r"\bpython\s+-m\s+http\.server\b",
+    r"\bnpm\s+run\s+dev\b",
+    r"\bnpm\s+start\b",
+    r"\bnode\s+.*--watch\b",
+    r"\bflask\s+run\b",
+    r"\buvicorn\b",
+    r"\bgunicorn\b",
+    r"\bjupyter\b",
+    r"\bless\b",
+    r"\bmore\b",
+    r"\bvi\b",
+    r"\bvim\b",
+    r"\bnano\b",
+    r"\btop\b",
+    r"\bhtop\b",
+]
+
+# Shell operators and commands that produce file output.
+_WRITE_INDICATORS = re.compile(
+    r"(?:"
+    r"\s>\s|\s>>\s"           # redirect operators (space-padded to avoid false positives on >> in heredocs)
+    r"|>(?!/dev/null)"        # bare redirect (but allow /dev/null)
+    r"|\btee\s"               # tee command
+    r"|\bmv\s|\bcp\s"         # move/copy
+    r"|\brm\s|\brmdir\s"      # remove
+    r"|\bmkdir\s"             # create dir
+    r"|\btouch\s"             # create file
+    r"|\bchmod\s|\bchown\s"   # permission changes
+    r"|\bln\s"                # symlinks
+    r"|\binstall\s"           # coreutils install
+    r"|\bdd\s"                # disk dump
+    r"|\bwget\s|\bcurl\s.*-o" # download to file
+    r")"
+)
+
+
+def _resolve_write_targets(cmd: str) -> list[str]:
+    """
+    Best-effort extraction of paths a command might write to.
+    Returns a list of path strings found after write-producing operators.
+    Not foolproof -- defence in depth with workspace cwd.
+    """
+    targets = []
+
+    # Redirects: anything after > or >>
+    for m in re.finditer(r">{1,2}\s*(\S+)", cmd):
+        targets.append(m.group(1))
+
+    # tee targets
+    for m in re.finditer(r"\btee\s+(?:-a\s+)?(\S+)", cmd):
+        targets.append(m.group(1))
+
+    # rm / mv / cp / mkdir / touch / chmod / chown -- last arg or -o flag
+    for m in re.finditer(r"\b(?:rm|mv|cp|mkdir|touch|chmod|chown|ln)\s+(.+?)(?:\s*[;&|]|$)", cmd):
+        # Take all non-flag tokens as potential targets
+        for token in m.group(1).split():
+            if not token.startswith("-"):
+                targets.append(token)
+
+    # wget -O / curl -o
+    for m in re.finditer(r"\b(?:wget\s+.*-O|curl\s+.*-o)\s*(\S+)", cmd):
+        targets.append(m.group(1))
+
+    # -o / --output flags (generic)
+    for m in re.finditer(r"(?:-o|--output)\s+(\S+)", cmd):
+        targets.append(m.group(1))
+
+    return targets
+
+
+def _is_inside_workspace(target: str, workspace: Path) -> bool:
+    """Check if a path target resolves inside the workspace."""
+    # /dev/null is always OK
+    if target.strip() in ("/dev/null", "NUL", "nul"):
+        return True
+    try:
+        resolved = (workspace / target).resolve()
+        ws_resolved = workspace.resolve()
+        return str(resolved).startswith(str(ws_resolved))
+    except (ValueError, OSError):
+        return False
+
+
+def sandbox_check(cmd: str, workspace: Path) -> str | None:
+    """
+    Check if a command is safe to execute. Returns None if OK,
+    or a human-readable block reason if the command should not run.
+    """
+    stripped = cmd.strip()
+
+    # 1. Foreground / interactive process detection
+    for pattern in FOREGROUND_PATTERNS:
+        if re.search(pattern, stripped):
+            return (f"BLOCKED: Foreground/interactive process detected ({pattern}). "
+                    f"Rewrite as a one-shot command or background with timeout.")
+
+    # 2. Sudo allowlist
+    sudo_match = re.match(r"^sudo\s+(\S+)", stripped)
+    if sudo_match:
+        sudo_subcmd = sudo_match.group(1)
+        # Strip path prefix (e.g., /usr/bin/apt -> apt)
+        sudo_subcmd = sudo_subcmd.rsplit("/", 1)[-1]
+        if sudo_subcmd not in SUDO_ALLOWLIST:
+            return (f"BLOCKED: sudo {sudo_subcmd} is not on the allowed list. "
+                    f"Allowed sudo commands: {', '.join(sorted(SUDO_ALLOWLIST))}")
+        # Also check write targets for sudo commands
+        # Remove the sudo prefix and check the rest
+        inner_cmd = stripped[stripped.index(sudo_subcmd):]
+        targets = _resolve_write_targets(inner_cmd)
+        for t in targets:
+            if not _is_inside_workspace(t, workspace):
+                # sudo apt/systemctl etc. write to system paths -- that's expected
+                # Only block sudo rm/mv/cp/chmod/chown outside workspace
+                if any(op in inner_cmd for op in ("rm ", "mv ", "cp ", "chmod ", "chown ")):
+                    return (f"BLOCKED: sudo command writes outside workspace: {t}")
+
+    # 3. Write-path checking (non-sudo commands)
+    if not sudo_match and _WRITE_INDICATORS.search(stripped):
+        targets = _resolve_write_targets(stripped)
+        for t in targets:
+            if not _is_inside_workspace(t, workspace):
+                return (f"BLOCKED: Command writes outside workspace: {t}. "
+                        f"All file modifications must target paths within {workspace}")
+
+    return None  # Command is OK
+
 
 def execute_command(cmd: str, workspace: Path) -> dict:
     """
-    Execute a shell command. Phase A: basic timeout, no sandboxing.
+    Execute a shell command with sandboxing.
+    Phase B: write-path enforcement, sudo allowlist, foreground blocking.
     Returns {"stdout", "stderr", "returncode", "timed_out"}.
     """
+    # Sandbox check
+    block_reason = sandbox_check(cmd, workspace)
+    if block_reason:
+        log(f"  {block_reason}")
+        print("\a", end="", flush=True)  # beep on blocked command
+        return {
+            "stdout": "",
+            "stderr": block_reason,
+            "returncode": -1,
+            "timed_out": False,
+        }
+
     # Determine timeout
     install_patterns = ["apt install", "pip install", "npm install", "cargo build"]
     timeout = CONFIG["cmd_timeout_default"]
