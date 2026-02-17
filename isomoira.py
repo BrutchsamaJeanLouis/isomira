@@ -875,9 +875,11 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
     last_review_code = ""
     last_impl_hash = None
     impl_stable_count = 0
+    last_failing_set = None
+    failing_set_count = 0
     test_result = {"passed": False, "output": ""}
     STUCK_THRESHOLD = 3
-    DK_PING_THRESHOLD = 5  # after this many stuck iterations, ping user
+    DK_PING_THRESHOLD = 5  # cumulative stuck iterations before DK ping + halt
     while True:
         iteration += 1
         log(f"\n{'=' * 40}")
@@ -960,15 +962,21 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
         log(f"Test output:\n{test_result['output'][:4000]}")
 
         # -- STUCK LOOP DETECTION --
-        # Hash the PASS/FAIL pattern, not raw output.
-        # Raw output contains memory addresses that change per run,
-        # defeating hash comparison even when results are identical.
+        # Two signals tracked independently:
+        # 1. P/F pattern hash: exact same PASS/FAIL sequence across all tests
+        # 2. Failing-set hash: same test NAMES fail, even if P/F order shuffles
+        # Both use cumulative counting — minor shuffles don't fully reset.
         pf_pattern = []
+        current_failing = []
         for line in test_result["output"].split("\n"):
             if "PASSED" in line:
                 pf_pattern.append("P")
             elif "FAILED" in line and "::" in line:
                 pf_pattern.append("F")
+                # Extract just the test name (e.g. "test_get_gradient_boundary")
+                parts = line.strip().split("::")
+                if len(parts) >= 2:
+                    current_failing.append(parts[-1].split()[0])
         test_hash = hashlib.md5("".join(pf_pattern).encode()).hexdigest()
         if test_hash == last_test_hash:
             stuck_count += 1
@@ -976,13 +984,27 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
             stuck_count = 1
             last_test_hash = test_hash
 
-        if stuck_count >= STUCK_THRESHOLD:
-            log(f"STUCK LOOP DETECTED: same test output {stuck_count} times in a row")
+        # Track failing test set separately — survives P/F pattern shuffles
+        failing_set = frozenset(current_failing)
+        if failing_set == last_failing_set:
+            failing_set_count += 1
+        else:
+            failing_set_count = 1
+            last_failing_set = failing_set
+
+        # Effective stuck score: max of both signals
+        effective_stuck = max(stuck_count, failing_set_count)
+
+        if effective_stuck >= STUCK_THRESHOLD:
+            log(f"STUCK LOOP DETECTED: effective stuck score {effective_stuck} "
+                f"(pf_repeat={stuck_count}, failing_set_repeat={failing_set_count})")
 
         # -- DK PING: detect probable Domain Knowledge gap --
-        # Signal: tests stuck + implementation stable = the code is right
-        # but the tests expect wrong behavior. That's a DK problem.
-        if stuck_count >= DK_PING_THRESHOLD and impl_stable_count >= DK_PING_THRESHOLD - 1:
+        # Signal: same tests keep failing for DK_PING_THRESHOLD iterations.
+        # Whether Devstral tweaks whitespace or not is irrelevant -- if the
+        # same failures persist, the problem is upstream in the spec.
+        # ACTION: log, beep, HALT. No point burning tokens on a spec problem.
+        if effective_stuck >= DK_PING_THRESHOLD:
             failing_tests = [l.strip() for l in test_result["output"].split("\n")
                              if "FAILED" in l and "::" in l and "short test" not in l]
             # Extract assertion lines for gap-finding clues
@@ -992,7 +1014,8 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
             ping_msg = (
                 f"\n{'!' * 60}\n"
                 f"DK PING: Probable Domain Knowledge gap detected.\n"
-                f"  Tests stuck for {stuck_count} iterations.\n"
+                f"  Effective stuck score: {effective_stuck} "
+                f"(pf={stuck_count}, failing_set={failing_set_count})\n"
                 f"  Implementation unchanged for {impl_stable_count} iterations.\n"
                 f"\n"
                 f"  FAILING TESTS:\n"
@@ -1021,10 +1044,13 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
                 f"    for edge/corner cases, not just interior\n"
                 f"  - Test uses internal state? (_var) Check if DK specifies\n"
                 f"    the public interface contract\n"
+                f"\n"
+                f"  HALTING -- fix task.md and rerun.\n"
                 f"{'!' * 60}"
             )
             log(ping_msg)
             print("\a\a\a", end="", flush=True)  # triple beep = DK ping
+            break  # HALT: don't burn tokens on a spec problem
 
         # -- PHASE 5: REVIEW --
         log("\n--- PHASE 5: REVIEW ---")
