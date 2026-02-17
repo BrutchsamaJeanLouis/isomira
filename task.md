@@ -1,51 +1,56 @@
 # Task
 
-Build a **Last-Writer-Wins Element Set (LWW-Element-Set) CRDT** backed by **vector clocks** for causal ordering. This is a conflict-free replicated data type suitable for distributed systems where multiple replicas can independently add/remove elements and later merge their states.
+Build the classical physics foundation for a 2D world simulation: a **ToyWorld** class that manages a grid with energy sources and obstacles, and computes a potential field using gradient-based attraction/repulsion.
 
-The implementation goes in a single file `lww_set.py`.
+The implementation goes in a single file `toy_world.py`.
 
 ## Scope
 
-workspace/lww_set.py
+workspace/toy_world.py
 
 ## Domain Knowledge
 
-### Vector Clocks
-- A vector clock is a `dict[str, int]` mapping replica IDs to logical counters.
-- **Incrementing:** When replica `r` performs an operation, it increments `vc[r]` by 1.
-- **Comparison rules (these are precise -- do not deviate):**
-  - `vc_a == vc_b`: every key in the union of both clocks has the same value (missing keys count as 0).
-  - `vc_a <= vc_b` (a is dominated by or equal to b): for every key `k` in the union, `vc_a.get(k, 0) <= vc_b.get(k, 0)`.
-  - `vc_a < vc_b` (a strictly happens-before b): `vc_a <= vc_b` AND `vc_a != vc_b`.
-  - `vc_a` and `vc_b` are **concurrent** if neither `vc_a <= vc_b` nor `vc_b <= vc_a`.
-- **Merge of two vector clocks:** For each key `k` in the union, `merged[k] = max(vc_a.get(k, 0), vc_b.get(k, 0))`.
+### Grid and Coordinate System
+- The world is a 2D NumPy array of shape `(size, size)` where `size` is configurable (default 128).
+- Coordinates are `(row, col)` integers. Row 0 is top, row size-1 is bottom. Column 0 is left.
+- The grid stores floating-point potential values. Lower potential = more attractive. Higher potential = repulsive.
 
-### LWW-Element-Set
-- Maintains two internal sets: an **add_set** and a **remove_set**.
-- Each entry in add_set and remove_set is a tuple of `(element, vector_clock)`.
-- **`add(element, replica_id)`:** Increment the vector clock for this replica, then store `(element, copy_of_current_vc)` in the add_set.
-- **`remove(element, replica_id)`:** Increment the vector clock for this replica, then store `(element, copy_of_current_vc)` in the remove_set. Removing an element that was never added is a no-op (do not raise).
-- **`lookup(element) -> bool`:** An element is in the set if and only if there exists an add entry for it whose vector clock is NOT strictly dominated by any remove entry for that same element. Formally: element is present iff `∃ (e, vc_add) in add_set` such that `¬∃ (e, vc_rem) in remove_set` where `vc_add < vc_rem`.
-- **`elements() -> set`:** Returns the set of all elements for which `lookup` returns True.
-- **`merge(other)`:** Combines two LWW-Element-Sets:
-  - The merged add_set is the union of both add_sets.
-  - The merged remove_set is the union of both remove_sets.
-  - The merged vector clock is the pointwise max of both clocks.
-  - Merge must be **commutative** (`a.merge(b)` gives same state as `b.merge(a)`), **associative**, and **idempotent** (`a.merge(a)` is a no-op).
-  - Merge mutates `self` in-place and also mutates `other` to the same final state (both replicas converge).
+### Energy Sources
+- An energy source is a tuple `(row, col, strength)` where strength is a positive float.
+- Energy sources CREATE attraction: they LOWER the potential in their vicinity.
+- The potential contribution of a source at distance `d` from its center is: `-strength / (d + 1.0)`. The `+1.0` prevents division by zero at the source location itself.
+- Distance `d` is Euclidean: `sqrt((r2-r1)**2 + (c2-c1)**2)`.
+- Multiple sources sum their contributions (superposition).
 
-### Critical Edge Cases (models frequently get these wrong)
-- **Concurrent add and remove of the same element:** If replica A adds "x" and replica B removes "x" concurrently (neither VC dominates), the element SHOULD be present after merge (add-wins on concurrency -- this is the "bias" of this CRDT variant).
-- **Re-adding after remove:** If "x" is removed, then added again with a later VC, it must reappear.
-- **Multiple VCs per element:** The add_set and remove_set can contain MULTIPLE entries for the same element (with different vector clocks). All of them matter for lookup.
-- **Empty/missing replica IDs in VCs:** A missing key in a VC means counter 0 for that replica. Comparisons must handle asymmetric key sets.
-- **CRITICAL -- Sequential single-replica operations:** When ONE replica does add, add, add, remove in sequence, EVERY prior add's VC is strictly dominated by the remove's VC (because all operations are on the same replica counter: r1:1, r1:2, r1:3 are ALL < r1:4). The element is NOT present after this sequence. Multiple adds only survive a remove when they come from DIFFERENT replicas with concurrent VCs. Do NOT confuse "multiple adds exist" with "at least one add survives" -- survival depends entirely on VC comparison, not on count of adds.
+### Obstacles
+- An obstacle is a tuple `(row, col, radius)` where radius is a positive float.
+- Obstacles CREATE repulsion: they RAISE the potential in their vicinity.
+- Every grid cell whose Euclidean distance from the obstacle center is `<= radius` gets a large positive potential added: `+1000.0` (a wall). Cells outside the radius are unaffected by the obstacle.
+- This is a hard barrier, not a smooth falloff. Inside radius = +1000, outside = 0.
+
+### Potential Field Computation
+- `compute_potential_field()` returns a 2D NumPy array of shape `(size, size)`.
+- For each cell `(r, c)`: `potential[r, c] = sum of all energy source contributions + sum of all obstacle contributions`.
+- The field is computed from scratch each call (no caching). Sources and obstacles may change between calls.
+
+### Gradient Extraction
+- `get_gradient(row, col)` returns a tuple `(dr, dc)` -- the direction of steepest DESCENT (toward lower potential) at a given cell.
+- Use central differences: `dr = potential[r+1, c] - potential[r-1, c]`, `dc = potential[r, c+1] - potential[r, c-1]`.
+- At grid boundaries (row 0, row size-1, col 0, col size-1), clamp indices to valid range. Example: at row 0, use `potential[1, c] - potential[0, c]` instead of `potential[1, c] - potential[-1, c]`.
+- The returned gradient points DOWNHILL (toward lower potential). Negate if the raw difference gives uphill direction. Specifically: `dr = -(potential[r+1,c] - potential[r-1,c]) / 2.0`, `dc = -(potential[r,c+1] - potential[r,c-1]) / 2.0` for interior cells.
+- Do NOT normalize the gradient vector. Return raw magnitude.
+
+### CRITICAL -- "agent" Disambiguation
+This code defines a WORLD (environment). It does NOT define agents, AI models, or decision-makers. The word "agent" does not appear in this task. Entities that navigate this world will be built in a separate future task. This file is ONLY the environment: grid, sources, obstacles, potential field, gradient.
 
 ## Constraints
 
-- No external dependencies. stdlib only.
+- Dependencies: `numpy` only. No scipy, no pygame, no matplotlib in the implementation file.
 - All public methods must have type hints.
-- The vector clock must be a plain `dict[str, int]`, not a custom class. Helper functions for VC operations (compare, merge, increment) should be module-level functions, not methods on the set.
-- Do not use `datetime` or wall-clock timestamps anywhere. Ordering is purely via vector clocks.
-- The `merge()` method must converge both replicas to identical state (mutate both `self` and `other`).
-- Store add_set and remove_set as `list[tuple[Any, dict[str, int]]]` -- not dicts, not sets. Elements can have multiple entries with different VCs.
+- The constructor takes `size: int = 128` as its only parameter.
+- `energy_sources` and `obstacles` are stored as `list[tuple[float, float, float]]` -- public attributes, not private.
+- `add_energy_source(row, col, strength)` and `add_obstacle(row, col, radius)` append to these lists.
+- `compute_potential_field()` returns `numpy.ndarray` of dtype float64.
+- `get_gradient(row, col)` returns `tuple[float, float]`.
+- Do not use any `@jit` or numba decorators -- keep it pure numpy for Phase 1.
+- The grid wraps nothing. Out-of-bounds is handled by clamping, not wrapping.

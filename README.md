@@ -435,71 +435,26 @@ Both use the same conservative settings. At these quant levels, sampling diversi
 
 ## Build Phases
 
-### Phase A: Walking Skeleton (BUILD THIS FIRST)
+### Phase A: Walking Skeleton -- COMPLETE
 
-**Goal:** End-to-end loop that compiles and runs, even if output quality is low.
+State machine loop (SUMMARISE -> PLAN -> IMPLEMENT -> TEST -> REVIEW -> loop), LMStudio API integration, AST-based codebase summary, output parsers (FILE/CMD blocks + JSON), pytest runner, context assembly with re-anchoring. Validated on trivial math_utils task and LWW-Element-Set CRDT task.
 
-**What to build:**
-1. `isomoira.py` with the state machine loop: SUMMARISE → PLAN → IMPLEMENT → TEST → REVIEW → loop
-2. `call_model()` function hitting LMStudio API
-3. Codebase summary generator using `ast` module (Python files only)
-4. Basic output parser: extract `===FILE===` blocks and `===CMD===` blocks from model output
-5. Test runner: subprocess call to `pytest`
-6. Minimal command executor: run commands with timeout, no sandboxing yet
-7. Context assembly: concatenate philosophy.md + task.md + summary + phase-specific content
-8. Loop logic: if tests fail, go to REVIEW then back to IMPLEMENT
+### Phase B: Command Executor + Sandboxing -- COMPLETE
 
-**What to skip:**
-- Command sandboxing (just log commands, don't restrict yet)
-- Context compression (just truncate if too long)
-- Beep notifications
-- JSON validation retries (if parse fails, log and halt)
+Three-layer sandbox: (1) write-path enforcement with target extraction from redirects/tee/rm/mv/cp/mkdir/touch/chmod/wget/curl, path traversal resolution, /dev/null exemption; (2) sudo allowlist (apt/systemctl/service/kill/lsof/fuser/ufw/netstat/ss only); (3) foreground process blocking (tail -f/watch/http.server/npm run dev/vim/top etc). Blocked commands return reason as stderr for model self-correction. 34/34 test scenarios pass.
 
-**Test it with:** A trivial task. "Create a Python file `math_utils.py` with a function `add(a, b)` that returns the sum." This should complete in 1-2 loop iterations.
+### Phase C: Context Compression + Re-anchoring -- COMPLETE
 
-**Definition of done for Phase A:** The orchestrator writes a passing test file and a passing implementation file for the trivial task without human intervention.
+Token estimation (len//4), context truncation, re-anchoring (philosophy.md + task.md + codebase_summary injected every iteration), test output compression (failure lines only for Devstral context).
 
----
+### Phase D: Robustness -- COMPLETE
 
-### Phase B: Command Executor + Sandboxing
+normalize_plan() handles wildly varying model schemas (10+ key aliases, regex .py scanning, fallback_file inference). Test protection guardrail (count_test_functions rejects review updates that shrink the suite). Stuck loop detection via MD5 hash of test output. Review-to-implementation feedback pipeline: diagnosis + test failures + code corrections (extract_review_code) wired into Devstral context. UTF-8 logging, Windows cp1252 safe console output.
 
-**Goal:** Safe unattended command execution.
+### Validation History
 
-**What to build:**
-1. Command sanitiser: sudo allowlist, write-path checking, foreground process detection
-2. Timeout tiers: default 30s, install 300s
-3. Beep notification on blocked commands: `print('\a', end='', flush=True)`
-4. Output truncation for context budget
-5. Passwordless sudo setup documentation (sudoers config for WSL)
-
-**Test it with:** A task that requires `pip install pytest` and writes files. Verify that commands inside workspace execute, commands outside workspace get blocked with beep, and sudo apt commands work without password prompt.
-
----
-
-### Phase C: Context Compression + Re-anchoring
-
-**Goal:** Survive long loops without context overflow.
-
-**What to build:**
-1. Token counting (approximate: `len(text) // 4` is close enough for v1)
-2. Compression rules: strip passing tests, abbreviate unchanged files, keep only latest diagnosis
-3. Re-anchoring: prepend philosophy.md + task.md + codebase_summary on every iteration
-4. Logging: print compressed context size each iteration so you can see the budget
-
-**Test it with:** A task that intentionally requires 5+ iterations (e.g., a function with multiple edge cases where the model will get some wrong on first pass). Verify context doesn't grow unbounded.
-
----
-
-### Phase D: Robustness
-
-**Goal:** Handle the failure modes that will appear in real use.
-
-**What to build:**
-1. JSON parse retries with corrective feedback
-2. Model output validation (does the file block contain actual code, not an apology?)
-3. Stuck loop detection: if the same test fails 5 times with identical error, inject a hint: "You have attempted this fix 5 times with the same result. Try a fundamentally different approach."
-4. Graceful shutdown on Ctrl+C: write current state to `isomoira_state.json` so you can potentially resume
-5. Full logging to `isomoira.log` with timestamps and phase markers
+- **LWW-Element-Set CRDT with vector clocks** (5 runs): Partial ordering, concurrent operations, add-wins bias, merge convergence. Best: 10/11 in 11 iterations. Final test failure traced to hallucinated test expectation (sequential single-replica operations confused with concurrent multi-replica). Fixed via Domain Knowledge injection.
+- **Trivial math_utils** (calibration): 1-2 iterations to completion.
 
 ---
 
@@ -531,6 +486,14 @@ Auto-commit after each successful test pass. Auto-branch before each task. This 
 
 ## Philosophy on Overengineering
 
-Build Phase A first. Use it for a week. The failure modes you actually encounter will tell you whether Phase B, C, or D is more urgent. Do not build all four phases before running a single task. The sequence above is a suggestion, not a mandate. Real usage will reorder priorities.
+All four build phases (A-D) are complete and validated. The orchestrator is a single file (~900 lines) containing a state machine with helper functions. Future pathway items (semantic retrieval, session persistence, third model role) remain deferred until real usage on multi-file projects demands them.
 
 The orchestrator is a for-loop with a match statement. Keep it that way as long as possible.
+
+## Current Project: QIWM (Quantum-Inspired World Model)
+
+Active task: bio-inspired agents navigating a 2D grid using quantum-inspired field dynamics. Phases are fed to the orchestrator one at a time via task.md. See task.md for the current phase scope.
+
+This project tests architectural novelty: the Isomoira agent (orchestrator) builds a system containing agents (NanoAgents). The word "agent" creates interpretive tension that stress-tests the models' ability to disambiguate context from their own substrate.
+
+Related work: [Poetiq AI](https://poetiq.ai/) ($45.8M seed, 2026) demonstrates this same paradigm at scale -- LLMs as substrate, orchestration as intelligence. Isomoira is a minimal local instantiation of this principle.
