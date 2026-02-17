@@ -873,8 +873,11 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
     stuck_count = 0
     last_diagnosis = ""
     last_review_code = ""
+    last_impl_hash = None
+    impl_stable_count = 0
     test_result = {"passed": False, "output": ""}
     STUCK_THRESHOLD = 3
+    DK_PING_THRESHOLD = 5  # after this many stuck iterations, ping user
     while True:
         iteration += 1
         log(f"\n{'=' * 40}")
@@ -923,6 +926,15 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
                 fpath.write_text(block["content"])
                 log(f"  Wrote: {block['path']}")
 
+        # Track implementation stability (is Devstral producing the same code?)
+        impl_content = "".join(b["content"] for b in file_blocks) if file_blocks else ""
+        impl_hash = hashlib.md5(impl_content.encode()).hexdigest()
+        if impl_hash == last_impl_hash:
+            impl_stable_count += 1
+        else:
+            impl_stable_count = 0
+            last_impl_hash = impl_hash
+
         # Parse and execute command blocks
         cmd_blocks = parse_cmd_blocks(impl_output)
         for cmd in cmd_blocks:
@@ -966,6 +978,29 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
 
         if stuck_count >= STUCK_THRESHOLD:
             log(f"STUCK LOOP DETECTED: same test output {stuck_count} times in a row")
+
+        # -- DK PING: detect probable Domain Knowledge gap --
+        # Signal: tests stuck + implementation stable = the code is right
+        # but the tests expect wrong behavior. That's a DK problem.
+        if stuck_count >= DK_PING_THRESHOLD and impl_stable_count >= DK_PING_THRESHOLD - 1:
+            failing_tests = [l.strip() for l in test_result["output"].split("\n")
+                             if "FAILED" in l and "::" in l and "short test" not in l]
+            ping_msg = (
+                f"\n{'!' * 60}\n"
+                f"DK PING: Probable Domain Knowledge gap detected.\n"
+                f"  Tests stuck for {stuck_count} iterations.\n"
+                f"  Implementation unchanged for {impl_stable_count} iterations.\n"
+                f"  Pattern: Devstral's code is stable but tests keep failing.\n"
+                f"  This usually means the TEST expectations are wrong,\n"
+                f"  not the implementation. Check task.md Domain Knowledge\n"
+                f"  for ambiguity or missing facts.\n"
+                f"  Failing tests:\n"
+            )
+            for ft in failing_tests[:5]:
+                ping_msg += f"    {ft}\n"
+            ping_msg += f"{'!' * 60}"
+            log(ping_msg)
+            print("\a\a\a", end="", flush=True)  # triple beep = DK ping
 
         # -- PHASE 5: REVIEW --
         log("\n--- PHASE 5: REVIEW ---")
