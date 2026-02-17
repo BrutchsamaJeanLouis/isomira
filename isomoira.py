@@ -985,20 +985,44 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
         if stuck_count >= DK_PING_THRESHOLD and impl_stable_count >= DK_PING_THRESHOLD - 1:
             failing_tests = [l.strip() for l in test_result["output"].split("\n")
                              if "FAILED" in l and "::" in l and "short test" not in l]
+            # Extract assertion lines for gap-finding clues
+            assert_lines = [l.strip() for l in test_result["output"].split("\n")
+                            if l.strip().startswith("E ") and ("assert" in l.lower()
+                            or "!=" in l or "==" in l or "<" in l or ">" in l)]
             ping_msg = (
                 f"\n{'!' * 60}\n"
                 f"DK PING: Probable Domain Knowledge gap detected.\n"
                 f"  Tests stuck for {stuck_count} iterations.\n"
                 f"  Implementation unchanged for {impl_stable_count} iterations.\n"
-                f"  Pattern: Devstral's code is stable but tests keep failing.\n"
-                f"  This usually means the TEST expectations are wrong,\n"
-                f"  not the implementation. Check task.md Domain Knowledge\n"
-                f"  for ambiguity or missing facts.\n"
-                f"  Failing tests:\n"
+                f"\n"
+                f"  FAILING TESTS:\n"
             )
             for ft in failing_tests[:5]:
                 ping_msg += f"    {ft}\n"
-            ping_msg += f"{'!' * 60}"
+            if assert_lines:
+                ping_msg += f"\n  ASSERTION CLUES (what the test expected vs got):\n"
+                for al in assert_lines[:8]:
+                    ping_msg += f"    {al}\n"
+            ping_msg += (
+                f"\n"
+                f"  ACTION REQUIRED -- human DK review:\n"
+                f"  1. Read the failing test names above\n"
+                f"  2. Open test file in workspace/ and trace the assertion\n"
+                f"  3. Open task.md Domain Knowledge and find the gap\n"
+                f"  4. Fix task.md (add missing fact or resolve ambiguity)\n"
+                f"  5. Clear workspace + log, rerun fresh\n"
+                f"\n"
+                f"  GAP-FINDING INDICATORS:\n"
+                f"  - Reversed comparison? (< vs >) Check if DK specifies\n"
+                f"    which direction values increase/decrease\n"
+                f"  - Value slightly off? (999.5 vs 1000) Check if DK\n"
+                f"    explains how multiple effects combine (superposition)\n"
+                f"  - Wrong at boundary? Check if DK has explicit formulas\n"
+                f"    for edge/corner cases, not just interior\n"
+                f"  - Test uses internal state? (_var) Check if DK specifies\n"
+                f"    the public interface contract\n"
+                f"{'!' * 60}"
+            )
             log(ping_msg)
             print("\a\a\a", end="", flush=True)  # triple beep = DK ping
 

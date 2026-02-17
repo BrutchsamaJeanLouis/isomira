@@ -244,16 +244,70 @@ Ministral returned something that isn't valid JSON. This happens when the model 
 
 The plan JSON was valid but the `plan` array had no entries with a recognizable `file` key. The normalizer checks for `file`, `filename`, `filepath`, `path`, and `file_path`. If the model used something else entirely, the entries get dropped.
 
-### Tests fail repeatedly with the same error
+### Tests fail repeatedly with the same error (Stuck Loop)
 
-The orchestrator currently has no stuck-loop detection (Phase D TODO). If you see the same failure 5+ times, kill it (Ctrl+C) and either:
-- Fix the issue manually in workspace and rerun
-- Add more detail to the Domain Knowledge section of task.md
-- Simplify the task scope
+The orchestrator detects stuck loops by hashing the PASS/FAIL pattern of test results. After 3 identical iterations, it logs `STUCK LOOP DETECTED` and injects a hint to Devstral to try a different approach.
+
+If tests remain stuck AND Devstral's code stops changing (both frozen for 5+ iterations), the orchestrator fires a **DK PING** -- a triple beep with an actionable diagnostic in the terminal. This means the problem is almost certainly in task.md Domain Knowledge, not in the implementation. See the DK PING Workflow section below.
 
 ### UnicodeEncodeError
 
 All orchestrator strings are ASCII-safe. If you see encoding errors, they're from model output containing Unicode. The log() function replaces unencodable chars automatically, but if a crash happens before log() (e.g., in file writes), add `encoding="utf-8"` to the relevant `write_text()` call.
+
+---
+
+## DK PING Workflow
+
+When the orchestrator fires a DK PING (triple beep + diagnostic in terminal), it means:
+- Tests are stuck (same PASS/FAIL pattern for 5+ iterations)
+- Implementation is stable (Devstral producing identical code)
+- The code is probably correct but the tests expect wrong behavior
+- The root cause is in task.md Domain Knowledge, not the implementation
+
+### Notification Tiers
+
+| Signal | Beeps | Meaning |
+|--------|-------|---------|
+| Task complete | 1 | All tests pass |
+| Command blocked | 1 | Sandbox rejected a command |
+| Stuck loop | 0 | Same test pattern 3+ times (logged, no beep) |
+| **DK PING** | **3** | **Domain Knowledge gap -- human intervention needed** |
+
+### What To Do When DK PING Fires
+
+1. **Kill the run** (Ctrl+C). It won't self-correct.
+
+2. **Read the failing test names** from the terminal output. The DK PING lists them.
+
+3. **Open the test file** in `workspace/` and find the failing assertion. Trace through the exact values. The DK PING also shows "ASSERTION CLUES" with the expected-vs-got values.
+
+4. **Open task.md Domain Knowledge** and find the gap. Use these indicators:
+
+5. **Fix task.md** (add the missing fact or resolve the ambiguity). Never fix the test file or implementation directly -- let the models regenerate from corrected DK.
+
+6. **Clear workspace + log, rerun fresh:**
+   ```powershell
+   Remove-Item -Recurse -Force .\workspace\* -ErrorAction SilentlyContinue
+   "" | Set-Content .\isomoira.log
+   python .\isomoira.py
+   ```
+
+### Gap-Finding Indicators
+
+When you're staring at a failing assertion and can't see what's wrong in task.md, check these patterns:
+
+| Indicator | What You See | What's Missing in DK |
+|-----------|-------------|---------------------|
+| **Reversed comparison** | `assert -5.0 < -10.0` fails | DK has the formula but doesn't say which direction values grow. Add explicit "X is MORE negative than Y" or "value at source < value at neighbor on the number line." |
+| **Value slightly off** | `assert isclose(x, 1000.0)` but got 999.5 | DK says two effects exist but doesn't say they combine. Add "A + B stack via superposition, result is not exactly A." |
+| **Wrong at boundary** | Interior tests pass, edge/corner tests fail | DK gives the general formula but not the edge case variant. Add explicit boundary formulas with divisors. |
+| **Test uses internal state** | `world._private_var = ...` then assertion fails | DK doesn't specify the public interface contract. Add "X is stored as self.X (public attribute)" and "tests must use public methods only." |
+| **Correct code, wrong test** | Implementation matches DK formulas exactly but test expects different values | DK is ambiguous enough that Ministral interpreted it differently than intended. Add a CRITICAL section with explicit numeric examples showing input -> output. |
+| **Type mismatch** | `assert x == 5` but x is `np.float64(5.0)` | DK doesn't specify return types precisely. Add type constraints. |
+
+### Key Principle
+
+The md files stay untouched by the agent. You are the only one who writes Domain Knowledge. The DK PING is the orchestrator telling you "I need better specs" -- it's a request upstream to the human, not an attempt to self-correct.
 
 ---
 
