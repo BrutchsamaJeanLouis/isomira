@@ -6,13 +6,12 @@ Step-by-step instructions for deploying the agentic TDD orchestrator against a n
 
 ## Prerequisites (one-time setup)
 
-### 1. LMStudio running with both models loaded
+### 1. LMStudio running with the model loaded
 
-Open LMStudio. Ensure these models are available (names must match CONFIG in isomoira.py):
+Open LMStudio. Ensure this model is available (name must match CONFIG in isomoira.py):
 
 ```
-Planner:      mistralai_ministral-3-14b-reasoning-2512   (Q6_K)
-Implementer:  mistralai_devstral-small-2-24b-instruct-2512  (IQ4_XS)
+Model:  mistralai_devstral-small-2-24b-instruct-2512  (single model, dual-profile)
 ```
 
 LMStudio must be serving on `http://localhost:1234/v1`. Verify with:
@@ -178,10 +177,10 @@ All flags:
 
 ```
 PHASE 1: SUMMARISE    Orchestrator scans workspace via AST. No model call.
-PHASE 2: PLAN         Ministral writes pytest tests + implementation plan.
-PHASE 3: IMPLEMENT    Devstral writes code based on the plan.
+PHASE 2: PLAN         Planner profile writes pytest tests + implementation plan.
+PHASE 3: IMPLEMENT    Implementer profile writes code based on the plan.
 PHASE 4: TEST         Orchestrator runs pytest. If all pass -> DONE.
-PHASE 5: REVIEW       If tests fail, Ministral diagnoses and revises plan.
+PHASE 5: REVIEW       If tests fail, planner profile diagnoses and revises plan.
                       Loop back to PHASE 3.
 ```
 
@@ -201,7 +200,7 @@ The orchestrator prints timestamped progress to stdout. Key things to watch:
 Wrote: filename        File written to workspace
 Tests passed: True     SUCCESS -- loop will exit
 Tests passed: False    FAILURE -- entering review cycle
-Diagnosis: ...         Ministral's root-cause analysis of failures
+Diagnosis: ...         Planner's root-cause analysis of failures
 ```
 
 ### Log file
@@ -218,8 +217,8 @@ During or after a run, look at what the models produced:
 
 ```powershell
 ls .\workspace\
-cat .\workspace\test_*.py     # the tests Ministral wrote
-cat .\workspace\*.py           # the implementation Devstral wrote
+cat .\workspace\test_*.py     # the tests the planner profile wrote
+cat .\workspace\*.py           # the implementation the implementer profile wrote
 ```
 
 ---
@@ -236,7 +235,7 @@ curl http://localhost:1234/v1/models
 
 ### "Plan phase produced unparseable output"
 
-Ministral returned something that isn't valid JSON. This happens when the model wraps its output in extra text. The orchestrator tries to extract JSON from the response but sometimes fails. Options:
+The planner returned something that isn't valid JSON. This happens when the model wraps its output in extra text. The orchestrator tries to extract JSON from the response but sometimes fails. Options:
 - Rerun. The model may produce valid JSON on the next attempt.
 - Simplify the task.md -- shorter, clearer instructions help quantized models stay on format.
 
@@ -246,9 +245,9 @@ The plan JSON was valid but the `plan` array had no entries with a recognizable 
 
 ### Tests fail repeatedly with the same error (Stuck Loop)
 
-The orchestrator detects stuck loops by hashing the PASS/FAIL pattern of test results. After 3 identical iterations, it logs `STUCK LOOP DETECTED` and injects a hint to Devstral to try a different approach.
+The orchestrator detects stuck loops by hashing the PASS/FAIL pattern of test results. After 3 identical iterations, it logs `STUCK LOOP DETECTED` and injects a hint to the implementer to try a different approach.
 
-If tests remain stuck AND Devstral's code stops changing (both frozen for 5+ iterations), the orchestrator fires a **DK PING** -- a triple beep with an actionable diagnostic in the terminal. This means the problem is almost certainly in task.md Domain Knowledge, not in the implementation. See the DK PING Workflow section below.
+If tests remain stuck for 5+ iterations (tracked via both P/F pattern and failing test set), the orchestrator fires a **DK PING** -- a triple beep with an actionable diagnostic in the terminal, then **halts the loop**. This means the problem is almost certainly in task.md Domain Knowledge, not in the implementation. See the DK PING Workflow section below.
 
 ### UnicodeEncodeError
 
@@ -260,7 +259,7 @@ All orchestrator strings are ASCII-safe. If you see encoding errors, they're fro
 
 When the orchestrator fires a DK PING (triple beep + diagnostic in terminal), it means:
 - Tests are stuck (same PASS/FAIL pattern for 5+ iterations)
-- Implementation is stable (Devstral producing identical code)
+- The same tests keep failing (tracked via P/F pattern and failing test set)
 - The code is probably correct but the tests expect wrong behavior
 - The root cause is in task.md Domain Knowledge, not the implementation
 
@@ -275,7 +274,7 @@ When the orchestrator fires a DK PING (triple beep + diagnostic in terminal), it
 
 ### What To Do When DK PING Fires
 
-1. **Kill the run** (Ctrl+C). It won't self-correct.
+1. **The run has already halted.** The orchestrator stops automatically on DK PING.
 
 2. **Read the failing test names** from the terminal output. The DK PING lists them.
 
@@ -302,7 +301,7 @@ When you're staring at a failing assertion and can't see what's wrong in task.md
 | **Value slightly off** | `assert isclose(x, 1000.0)` but got 999.5 | DK says two effects exist but doesn't say they combine. Add "A + B stack via superposition, result is not exactly A." |
 | **Wrong at boundary** | Interior tests pass, edge/corner tests fail | DK gives the general formula but not the edge case variant. Add explicit boundary formulas with divisors. |
 | **Test uses internal state** | `world._private_var = ...` then assertion fails | DK doesn't specify the public interface contract. Add "X is stored as self.X (public attribute)" and "tests must use public methods only." |
-| **Correct code, wrong test** | Implementation matches DK formulas exactly but test expects different values | DK is ambiguous enough that Ministral interpreted it differently than intended. Add a CRITICAL section with explicit numeric examples showing input -> output. |
+| **Correct code, wrong test** | Implementation matches DK formulas exactly but test expects different values | DK is ambiguous enough that the planner interpreted it differently than intended. Add a CRITICAL section with explicit numeric examples showing input -> output. |
 | **Type mismatch** | `assert x == 5` but x is `np.float64(5.0)` | DK doesn't specify return types precisely. Add type constraints. |
 
 ### Key Principle
@@ -323,7 +322,7 @@ The md files stay untouched by the agent. You are the only one who writes Domain
 
 5. **Keep total task.md under 1000 tokens.** The task gets re-injected every iteration. A 2000-token task eats 12% of the 16k context budget on every call.
 
-6. **Test the test.** After the first run, read the test file Ministral wrote. If the tests are wrong (testing for incorrect behaviour), the loop will never converge. Fix the tests manually and rerun, or add corrective detail to Domain Knowledge.
+6. **Test the test.** After the first run, read the test file the planner wrote. If the tests are wrong (testing for incorrect behaviour), the loop will never converge. Fix the tests manually and rerun, or add corrective detail to Domain Knowledge.
 
 ---
 

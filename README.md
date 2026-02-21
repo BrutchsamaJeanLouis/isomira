@@ -1,12 +1,12 @@
 # Isomoira
 
-A dual-model orchestrator for agentic coding. Ministral reasons. Devstral implements. Tests decide when it's done.
+A single-model orchestrator for agentic coding. Devstral plans, implements, and reviews via dual-profile tuning. Tests decide when it's done.
 
 ---
 
 ## What This Is
 
-A Python CLI tool that runs a TDD loop between two local LLMs served by LMStudio. A planning model (Ministral 14b-reasoning Q6_K) writes tests and architectural plans. An implementation model (Devstral 2512 IQ4_XS) writes code. The loop continues until all tests pass. No human in the loop after task submission.
+A Python CLI tool that runs a TDD loop using a single local LLM (Devstral 24B) served by LMStudio with dual-profile tuning. The planner profile writes tests and architectural plans. The implementer profile writes code. The loop continues until all tests pass. No human in the loop after task submission.
 
 The orchestrator handles context compression, command execution sandboxing, and phase handoffs. The models never touch the shell directly — the orchestrator mediates all execution.
 
@@ -32,7 +32,7 @@ The orchestrator handles context compression, command execution sandboxing, and 
 │     ┌──────────────┼──────────────┐                  │
 │     ▼              ▼              ▼                  │
 │  PLAN           IMPLEMENT      REVIEW                │
-│  (ministral)    (devstral)     (ministral)           │
+│  (planner)     (implementer)  (planner)              │
 │     │              │              │                  │
 │     └──────────────┼──────────────┘                  │
 │                    │                                  │
@@ -54,7 +54,7 @@ The orchestrator handles context compression, command execution sandboxing, and 
 
 These are non-negotiable and should guide every implementation decision:
 
-1. **~20k usable context per model call.** Both models are heavily quantized. Every token of context must earn its place. The orchestrator compresses aggressively between phases.
+1. **~20k usable context per model call.** The model is quantized. Every token of context must earn its place. The orchestrator compresses aggressively between phases.
 
 2. **Sequential, not parallel.** One model active at a time. One phase completes before the next begins. No concurrent model calls. LMStudio handles model swapping via its autoswap/TTL mechanism.
 
@@ -74,9 +74,7 @@ These are non-negotiable and should guide every implementation decision:
 - **Storage:** SSD
 - **OS:** WSL (Ubuntu) on Windows
 - **Model server:** LMStudio (OpenAI-compatible API, typically `http://localhost:1234/v1`)
-- **Models:**
-  - Planner: `ministral-14b-reasoning` @ Q6_K
-  - Implementer: `devstral-2512` @ IQ4_XS (or best quant that fits 16GB VRAM)
+- **Model:** Devstral 24B (`mistralai_devstral-small-2-24b-instruct-2512`) — single model, dual-profile (planner + implementer)
 
 ---
 
@@ -165,9 +163,9 @@ inclusion.
 
 ---
 
-### Phase 2: PLAN (Ministral)
+### Phase 2: PLAN (Devstral — planner profile)
 
-**Actor:** Ministral 14b-reasoning Q6_K
+**Actor:** Devstral 24B (planner profile)
 
 **Input context (must fit ~16k tokens total):**
 ```
@@ -181,7 +179,7 @@ inclusion.
 
 **System prompt directive:**
 ```
-You are the planning model in a two-model TDD pipeline. Your job:
+You are the planning profile in a single-model TDD pipeline. Your job:
 1. Analyse the task against the current codebase.
 2. Write pytest test functions FIRST that define the expected behaviour.
    Tests must be runnable independently. Use only stdlib + pytest.
@@ -224,9 +222,9 @@ Do not invent libraries or APIs not mentioned in Domain Knowledge.
 
 ---
 
-### Phase 3: IMPLEMENT (Devstral)
+### Phase 3: IMPLEMENT (Devstral — implementer profile)
 
-**Actor:** Devstral 2512 IQ4_XS
+**Actor:** Devstral 24B (implementer profile)
 
 **Input context (must fit ~16k tokens total):**
 ```
@@ -287,9 +285,9 @@ Output ONLY file blocks and command blocks. No explanations.
 
 ---
 
-### Phase 5: REVIEW (Ministral)
+### Phase 5: REVIEW (Devstral — planner profile)
 
-**Actor:** Ministral 14b-reasoning Q6_K
+**Actor:** Devstral 24B (planner profile)
 
 **Input context:**
 ```
@@ -412,8 +410,8 @@ These must match exactly what LMStudio loads. Configure in a `config` dict at th
 
 ```python
 CONFIG = {
-    "planner_model": "ministral-14b-reasoning-q6_k",  # update to match LMStudio
-    "implementer_model": "devstral-2512-iq4_xs",       # update to match LMStudio
+    "planner_model": "mistralai_devstral-small-2-24b-instruct-2512",
+    "implementer_model": "mistralai_devstral-small-2-24b-instruct-2512",
     "lmstudio_url": "http://localhost:1234/v1",
     "workspace": "./workspace",
     "max_context_tokens": 16000,
@@ -426,10 +424,10 @@ CONFIG = {
 
 The orchestrator sends fixed sampling parameters per model role. These are not configurable by the models.
 
-**Planner (Ministral):** `temperature: 0.15, top_k: 25, min_p: 0.05, top_p: 1.0`
-**Implementer (Devstral):** `temperature: 0.15, top_k: 25, min_p: 0.05, top_p: 1.0`
+**Planner profile:** `temperature: 0.6, top_p: 0.95, min_p: 0.05, repeat_penalty: 1.05`
+**Implementer profile:** `temperature: 0.4, top_p: 0.85, min_p: 0.05, repeat_penalty: 1.05`
 
-Both use the same conservative settings. At these quant levels, sampling diversity comes from quantization noise, not temperature. Keep it tight.
+Same model, different tuning. The planner profile runs hotter for broader test exploration. The implementer profile runs tighter for precise code generation. See `docs/singleModel.md` for the full dual-profile spec.
 
 ---
 

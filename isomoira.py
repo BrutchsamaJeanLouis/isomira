@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Isomoira -- Dual-model TDD orchestrator.
+Isomoira -- Single-model TDD orchestrator (dual-profile).
 Phases A-D complete. One file. One loop. Tests decide when it's done.
 Phase B: Command sandboxing (write-path, sudo allowlist, foreground blocking).
+Uses one model (Devstral 24B) with different temperature/prompt profiles for planning vs coding.
 """
 
 import ast
@@ -20,7 +21,7 @@ from pathlib import Path
 # ---------------------------------------------
 
 CONFIG = {
-    "planner_model": "mistralai_ministral-3-14b-reasoning-2512",
+    "planner_model": "mistralai_devstral-small-2-24b-instruct-2512",
     "implementer_model": "mistralai_devstral-small-2-24b-instruct-2512",
     "lmstudio_url": "http://localhost:1234/v1",
     "workspace": "./workspace",
@@ -184,8 +185,8 @@ def summarise_codebase(workspace: Path) -> str:
 def extract_review_code(review_data: dict) -> str:
     """
     Extract corrected code snippets from review plan entries.
-    Ministral often returns plan entries with a "code" key containing
-    the exact corrected function. Collect these so Devstral can use them.
+    The planner often returns plan entries with a "code" key containing
+    the exact corrected function. Collect these so the implementer can use them.
     Returns a formatted string of all code corrections, or empty string.
     """
     corrections = []
@@ -594,7 +595,7 @@ def assemble_plan_context(
     """
     system_prompt = f"""{philosophy}
 
-You are the planning model in a two-model TDD pipeline. Your job:
+You are the planning profile in a single-model TDD pipeline. Your job:
 1. Analyse the task against the current codebase.
 2. Write pytest test functions FIRST that define the expected behaviour.
    Tests must be runnable independently. Use only stdlib + pytest.
@@ -1122,7 +1123,7 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Isomoira -- Dual-model TDD orchestrator")
+    parser = argparse.ArgumentParser(description="Isomoira -- Single-model TDD orchestrator (dual-profile)")
     parser.add_argument("--task", default="task.md", help="Path to task file (default: task.md)")
     parser.add_argument("--philosophy", default="philosophy.md", help="Path to philosophy file (default: philosophy.md)")
     parser.add_argument("--workspace", default=None, help="Workspace directory (overrides CONFIG)")

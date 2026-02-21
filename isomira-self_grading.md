@@ -21,7 +21,7 @@ How many iterations to reach full test pass?
 
 ### 2. Test Quality (0-10)
 
-How good are the tests Ministral wrote?
+How good are the tests the planner wrote?
 
 | Score | Criteria |
 |-------|----------|
@@ -33,14 +33,14 @@ How good are the tests Ministral wrote?
 | 0 | Tests are fundamentally broken (wrong imports, test file doesn't parse) |
 
 **Key indicators:**
-- Float precision: Does Ministral use `assert abs(x - y) < tol` or exact `assert x == y`?
+- Float precision: Does the planner use `assert abs(x - y) < tol` or exact `assert x == y`?
 - Boundary gradient: Does the test expect `/1.0` or `/2.0` divisor at boundaries?
 - Obstacle semantics: Does the test check `<= radius` (correct) or `< radius` (off-by-one)?
 - Empty state: Does it test empty sources/obstacles returning all-zeros?
 
 ### 3. Implementation Quality (0-10)
 
-How good is Devstral's final code?
+How good is the implementer's final code?
 
 | Score | Criteria |
 |-------|----------|
@@ -79,7 +79,7 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 | 10 | No agent-related code in toy_world.py. Pure environment. Clean separation. |
 | 8 | Minor naming leakage (e.g., variable named `agent_position`) but no behavioral code |
 | 6 | Devstral added a navigation/decision method that wasn't in the task |
-| 4 | Ministral wrote tests for agent behavior that doesn't belong in Phase 1 |
+| 4 | Planner wrote tests for agent behavior that doesn't belong in Phase 1 |
 | 2 | Significant scope creep -- agent classes or decision logic in the environment file |
 | 0 | Complete confusion -- models built an agent system instead of a world |
 
@@ -94,7 +94,7 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 **Predicted baseline:** 8-12 tests, 3-5 iterations to completion.
 
 **Known risk factors:**
-- Float precision in tests (Ministral may use exact equality on computed floats)
+- Float precision in tests (planner may use exact equality on computed floats)
 - Boundary gradient divisor ambiguity (Domain Knowledge specifies interior formula but boundary formula is implicit -- forward/backward difference divides by 1.0 vs central difference by 2.0)
 - numpy import style mismatch between test and implementation
 - Obstacle barrier at exactly radius boundary (`<= radius` vs `< radius`)
@@ -191,7 +191,7 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 
 **Root cause analysis:**
 - DK had formulas but no conceptual shape (field landscape / well topology)
-- Ministral couldn't decompress formulas into correct inequality directions without the shape anchor
+- The planner couldn't decompress formulas into correct inequality directions without the shape anchor
 - Obstacle superposition stated but not reinforced with explicit "1000 + negative != exactly 1000"
 - get_gradient spec said "computed from scratch each call" but test tried to bypass via _potential
 - Boundary gradient formula ambiguous (divisor unspecified for forward/backward difference)
@@ -212,8 +212,8 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 When a run fails or gets stuck, check these in order:
 
 1. **Is the test expectation correct?** Trace through the Domain Knowledge formulas by hand for the exact test inputs. If the test expects a wrong value, the DK needs a clarifying statement.
-2. **Is the DK ambiguous?** If Ministral and Devstral disagree on a behavior, the DK didn't specify it precisely enough. Add an explicit statement resolving the ambiguity.
+2. **Is the DK ambiguous?** If the planner and implementer profiles disagree on a behavior, the DK didn't specify it precisely enough. Add an explicit statement resolving the ambiguity.
 3. **Is the DK missing a critical fact?** If the model hallucinated a behavior not mentioned in DK, add a "CRITICAL" bullet that explicitly states the correct behavior and warns against the hallucination.
-4. **Is the test scope correct?** If Ministral wrote tests for behavior outside the current phase (e.g., agent tests in Phase 1), the task.md disambiguation section needs strengthening.
+4. **Is the test scope correct?** If the planner wrote tests for behavior outside the current phase (e.g., agent tests in Phase 1), the task.md disambiguation section needs strengthening.
 
 After any DK fix: clear workspace, clear log, run fresh. Never patch implementation -- always let the models converge from scratch with the corrected DK.
