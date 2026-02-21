@@ -28,10 +28,37 @@ CONFIG = {
     "max_context_tokens": 16000,
     "cmd_timeout_default": 30,
     "cmd_timeout_install": 300,
-    "temperature": 0.15,
-    "top_k": 25,
-    "min_p": 0.05,
-    "max_tokens": 4096,
+}
+
+# Dual-profile tuning: same model, different sampling parameters.
+# Planner profile runs hotter for broader test/plan exploration.
+# Implementer profile runs tighter for precise code generation.
+# Conservative fallback used on retry-after-failure.
+PROFILES = {
+    "planner": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "max_tokens": 2048,
+    },
+    "implementer": {
+        "temperature": 0.4,
+        "top_p": 0.85,
+        "top_k": 0,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "max_tokens": 4096,
+    },
+    "conservative": {
+        "temperature": 0.2,
+        "top_p": 0.85,
+        "top_k": 0,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "max_tokens": 4096,
+    },
 }
 
 # ---------------------------------------------
@@ -47,13 +74,15 @@ def estimate_tokens(text: str) -> int:
 # MODEL CALLING
 # ---------------------------------------------
 
-def call_model(model_name: str, system_prompt: str, user_prompt: str) -> str:
+def call_model(model_name: str, system_prompt: str, user_prompt: str,
+               profile: str = "implementer") -> str:
     """
     Call LMStudio API. Blocking. Model autoswap handled by LMStudio.
-    Uses requests if available, falls back to urllib.
+    Profile selects sampling parameters: "planner", "implementer", or "conservative".
     """
     import requests
 
+    params = PROFILES.get(profile, PROFILES["implementer"])
     url = f"{CONFIG['lmstudio_url']}/chat/completions"
     payload = {
         "model": model_name,
@@ -61,11 +90,12 @@ def call_model(model_name: str, system_prompt: str, user_prompt: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": CONFIG["temperature"],
-        "top_k": CONFIG["top_k"],
-        "min_p": CONFIG["min_p"],
-        "top_p": 1.0,
-        "max_tokens": CONFIG["max_tokens"],
+        "temperature": params["temperature"],
+        "top_k": params["top_k"],
+        "min_p": params["min_p"],
+        "top_p": params["top_p"],
+        "repeat_penalty": params["repeat_penalty"],
+        "max_tokens": params["max_tokens"],
         "stream": False,
     }
 
@@ -840,7 +870,7 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
     # -- PHASE 2: PLAN --
     log("\n--- PHASE 2: PLAN ---")
     sys_prompt, usr_prompt = assemble_plan_context(philosophy, task, codebase_summary, scope_files)
-    plan_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt)
+    plan_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt, profile="planner")
 
     try:
         plan_data = parse_json_output(plan_output)
@@ -915,7 +945,7 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
             stuck_hint=stuck_hint,
             review_code=last_review_code,
         )
-        impl_output = call_model(CONFIG["implementer_model"], sys_prompt, usr_prompt)
+        impl_output = call_model(CONFIG["implementer_model"], sys_prompt, usr_prompt, profile="implementer")
 
         # Parse and apply file blocks
         file_blocks = parse_file_blocks(impl_output)
@@ -1069,7 +1099,7 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
         sys_prompt, usr_prompt = assemble_review_context(
             philosophy, task, test_content, test_result["output"], impl_files
         )
-        review_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt)
+        review_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt, profile="planner")
 
         try:
             review_data = parse_json_output(review_output)
