@@ -16,6 +16,27 @@ import sys
 import time
 from pathlib import Path
 
+# =============================================
+# PUBLIC API — entry points and key functions
+# =============================================
+__all__ = [
+    # Entry point
+    "run",
+    # Config
+    "CONFIG", "PROFILES",
+    # Model interface
+    "call_model",
+    # Command execution (independently testable)
+    "sandbox_check", "execute_command",
+    # Parsers
+    "parse_json_output", "parse_file_blocks", "parse_cmd_blocks",
+    "normalize_plan", "extract_review_code",
+    # Codebase analysis
+    "summarise_codebase",
+    # Test runner
+    "run_tests",
+]
+
 # ---------------------------------------------
 # CONFIG
 # ---------------------------------------------
@@ -66,8 +87,9 @@ PROFILES = {
 # ---------------------------------------------
 
 def estimate_tokens(text: str) -> int:
-    """Rough token count. ~4 chars per token for English/code."""
-    return len(text) // 4
+    """Rough token count. ~3 chars per token for code-heavy content.
+    Biased toward overcounting (compress early, not late)."""
+    return len(text) // 3
 
 
 # ---------------------------------------------
@@ -101,16 +123,25 @@ def call_model(model_name: str, system_prompt: str, user_prompt: str,
 
     log(f"  -> Calling {model_name} ({estimate_tokens(system_prompt + user_prompt)} est. tokens in)")
 
-    try:
-        response = requests.post(url, json=payload, timeout=300)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        log(f"  <- Got {estimate_tokens(content)} est. tokens back")
-        return content
-    except requests.exceptions.ConnectionError:
-        fatal("Cannot connect to LMStudio at " + CONFIG["lmstudio_url"])
-    except Exception as e:
-        fatal(f"Model call failed: {e}")
+    last_err = None
+    for attempt in range(4):  # 1 initial + 3 retries
+        try:
+            response = requests.post(url, json=payload, timeout=300)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            log(f"  <- Got {estimate_tokens(content)} est. tokens back")
+            return content
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_err = e
+            if attempt < 3:
+                delay = [2, 8, 32][attempt]
+                log(f"  Model call failed (attempt {attempt + 1}/4): {e}")
+                log(f"  Retrying in {delay}s (LMStudio may be swapping models)...")
+                time.sleep(delay)
+            else:
+                fatal(f"Cannot connect to LMStudio after 4 attempts: {last_err}")
+        except Exception as e:
+            fatal(f"Model call failed: {e}")
 
 
 # ---------------------------------------------
@@ -610,7 +641,7 @@ def read_file_safe(path: Path) -> str:
 
 def truncate_context(text: str, max_tokens: int) -> str:
     """Truncate text to approximate token limit."""
-    max_chars = max_tokens * 4
+    max_chars = max_tokens * 3
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n\n[...truncated to fit context window...]"
@@ -747,31 +778,80 @@ Output ONLY file blocks and command blocks. No explanations."""
     return system_prompt, user_prompt
 
 
+def assemble_test_audit_context(
+    philosophy: str, task: str, test_content: str, test_output: str,
+) -> tuple[str, str]:
+    """
+    Assemble prompts for Phase 5A: Test Audit.
+    Asks the planner to verify tests against Domain Knowledge BEFORE
+    blaming the implementation. Attacks the review asymmetry problem.
+    """
+    system_prompt = f"""{philosophy}
+
+You are auditing tests for correctness. Some tests may be failing because
+the TESTS are wrong, not the implementation. Your job:
+1. Re-read the Domain Knowledge section carefully.
+2. For each failing test, check: does the assertion match what DK specifies?
+3. Look for: reversed inequalities, wrong expected values, misunderstood
+   formulas, tests that assume behaviour not specified in DK.
+4. If ALL tests look correct, say so.
+
+Output format:
+{{
+  "tests_correct": true/false,
+  "issues": [
+    {{
+      "test_name": "test_xxx",
+      "problem": "brief description of what the test got wrong",
+      "fix": "what the assertion should be"
+    }}
+  ],
+  "tests": {{ "filename": "...", "content": "..." }}
+}}
+
+Include "tests" ONLY if you found issues and are providing corrected tests.
+If tests_correct is true, "issues" should be an empty list and omit "tests".
+Output ONLY the JSON object. No markdown fences. No preamble."""
+
+    user_parts = [
+        task,
+        "---\n## Test File\n```\n" + test_content + "\n```",
+        "---\n## Test Output (failures)\n```\n" + test_output + "\n```",
+    ]
+
+    user_prompt = "\n\n".join(user_parts)
+
+    total = estimate_tokens(system_prompt + user_prompt)
+    if total > CONFIG["max_context_tokens"]:
+        log(f"  Context too large ({total} tokens), truncating")
+        user_prompt = truncate_context(user_prompt, CONFIG["max_context_tokens"] - estimate_tokens(system_prompt) - 500)
+
+    return system_prompt, user_prompt
+
+
 def assemble_review_context(
     philosophy: str, task: str, test_content: str, test_output: str,
     impl_files: dict[str, str]
 ) -> tuple[str, str]:
     """
-    Assemble system + user prompts for the REVIEW phase.
+    Assemble system + user prompts for Phase 5B: Implementation Review.
+    Only called after Phase 5A confirms tests are correct.
     """
     system_prompt = f"""{philosophy}
 
-Tests are failing. Your job:
+The tests have been verified as correct. The failures are in the implementation.
+Your job:
 1. Analyse the test failures against the implementation.
 2. Identify the root cause of EACH failure.
 3. Write a corrected implementation plan addressing ONLY the failures.
    Do not rewrite parts that are working.
-4. If the tests themselves are wrong (testing for incorrect behaviour),
-   you may revise the tests. Explain why.
 
 Output format:
 {{
-  "tests": {{ "filename": "...", "content": "..." }},
   "plan": [ ... ],
   "diagnosis": "Brief explanation of what went wrong"
 }}
 
-Include "tests" ONLY if tests need to change.
 Output ONLY the JSON object. No markdown fences. No preamble."""
 
     user_parts = [
@@ -980,7 +1060,15 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
         # -- PHASE 4: TEST --
         log("\n--- PHASE 4: TEST ---")
         test_result = run_tests(workspace, test_filename)
-        log(f"Tests passed: {test_result['passed']}")
+
+        # Partial pass tracking: count PASSED/FAILED for convergence signal
+        n_passed = test_result["output"].count(" PASSED")
+        n_failed = test_result["output"].count(" FAILED")
+        n_total = n_passed + n_failed
+        if n_total > 0:
+            log(f"Tests: {n_passed}/{n_total} passed ({100*n_passed//n_total}%)")
+        else:
+            log(f"Tests passed: {test_result['passed']}")
 
         if test_result["passed"]:
             log("\n" + "=" * 60)
@@ -1083,8 +1171,50 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
             print("\a\a\a", end="", flush=True)  # triple beep = DK ping
             break  # HALT: don't burn tokens on a spec problem
 
-        # -- PHASE 5: REVIEW --
-        log("\n--- PHASE 5: REVIEW ---")
+        # -- PHASE 5A: TEST AUDIT --
+        log("\n--- PHASE 5A: TEST AUDIT ---")
+
+        # Re-read test content (may have been updated in a previous review)
+        test_content = (workspace / test_filename).read_text(errors="ignore")
+
+        sys_prompt, usr_prompt = assemble_test_audit_context(
+            philosophy, task, test_content, test_result["output"]
+        )
+        audit_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt, profile="planner")
+
+        try:
+            audit_data = parse_json_output(audit_output)
+        except ValueError as e:
+            log(f"WARNING: Test audit output unparseable: {e}")
+            audit_data = {"tests_correct": True, "issues": []}
+
+        tests_correct = audit_data.get("tests_correct", True)
+        audit_issues = audit_data.get("issues", [])
+        if audit_issues:
+            log(f"Test audit found {len(audit_issues)} issue(s):")
+            for issue in audit_issues[:5]:
+                if isinstance(issue, dict):
+                    log(f"  - {issue.get('test_name', '?')}: {issue.get('problem', '?')}")
+
+        # Apply test corrections from audit if provided
+        if not tests_correct and "tests" in audit_data and audit_data["tests"]:
+            proposed_content = audit_data["tests"].get("content", "")
+            proposed_count = count_test_functions(proposed_content)
+            if proposed_count >= original_test_count:
+                test_filename = audit_data["tests"].get("filename", test_filename)
+                test_content = proposed_content
+                (workspace / test_filename).write_text(test_content)
+                original_test_count = proposed_count
+                log(f"Audit corrected tests: {test_filename} ({proposed_count} test functions)")
+                # Skip 5B — re-run with corrected tests first
+                log("Skipping implementation review — re-running with corrected tests")
+                continue
+            else:
+                log(f"REJECTED audit test update: {proposed_count} tests vs "
+                    f"original {original_test_count}. Keeping original.")
+
+        # -- PHASE 5B: IMPLEMENTATION REVIEW --
+        log("\n--- PHASE 5B: IMPLEMENTATION REVIEW ---")
 
         # Reload implementation files
         impl_files = {}
@@ -1092,9 +1222,6 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
             fpath = workspace / block["path"]
             if fpath.exists():
                 impl_files[block["path"]] = fpath.read_text(errors="ignore")
-
-        # Re-read test content (may have been updated in a previous review)
-        test_content = (workspace / test_filename).read_text(errors="ignore")
 
         sys_prompt, usr_prompt = assemble_review_context(
             philosophy, task, test_content, test_result["output"], impl_files
@@ -1113,27 +1240,12 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
             last_diagnosis = review_data["diagnosis"]
             log(f"Diagnosis: {last_diagnosis}")
 
-        # Extract corrected code from review plan entries (Pathway 3)
+        # Extract corrected code from review plan entries
         last_review_code = extract_review_code(review_data)
         if last_review_code:
             log(f"Extracted {last_review_code.count('# Fix:') + last_review_code.count('# Correction')} code corrections from review")
 
-        if "tests" in review_data and review_data["tests"]:
-            proposed_content = review_data["tests"].get("content", "")
-            proposed_count = count_test_functions(proposed_content)
-            if proposed_count >= original_test_count:
-                test_filename = review_data["tests"].get("filename", test_filename)
-                test_content = proposed_content
-                (workspace / test_filename).write_text(test_content)
-                original_test_count = proposed_count
-                log(f"Updated tests: {test_filename} ({proposed_count} test functions)")
-            else:
-                log(f"REJECTED test update: review has {proposed_count} tests, "
-                    f"original has {original_test_count}. Keeping original to prevent regression.")
-
         if "plan" in review_data and review_data["plan"]:
-            # Infer fallback file from current plan so review entries
-            # that describe function-level fixes (no file path) still work
             fallback = plan[0]["file"] if plan else ""
             new_plan = normalize_plan(review_data["plan"], fallback_file=fallback)
             if new_plan:

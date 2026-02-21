@@ -178,6 +178,10 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 | Run | Tests | Best Pass Rate | Iterations | Outcome | Key Issue |
 |-----|-------|---------------|------------|---------|-----------|
 | 1 | 10 | 6/10 | 17 (killed) | FAIL | 4 wrong tests: reversed inequality (x2), obstacle ignores superposition, test bypasses public API via _potential |
+| 2 | 11 | 6/11 | 9+ (killed) | FAIL | DK PING never fired (impl hash cosmetic changes, no break after PING) |
+| 3 | 8 | 6/8 | 6 (DK PING halt) | FAIL | DK PING worked correctly, halted to save tokens. 2 test bugs remaining. |
+| 4a | 8 | 6/8 | 6 (DK PING halt) | FAIL | Pre-fix orchestrator (Mistral Small planner). Review blamed impl 4x, never considered test bugs. |
+| 4b | 8 | **8/8 (100%)** | **4** | **PASS** | Post-fix orchestrator (bifurcated review + partial pass tracking + len//3). First QIWM success. |
 
 **Run 1 scores:**
 | Dimension | Score | Notes |
@@ -189,7 +193,46 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 | Agent Disambiguation | 10/10 | No agent code leaked. Pure environment class. |
 | **Total** | **24/50** | Below 38/50 threshold. |
 
-**Root cause analysis:**
+**Run 4b scores (post-fix orchestrator):**
+| Dimension | Score | Notes |
+|-----------|-------|-------|
+| Convergence Speed | 8/10 | 4 iterations to 8/8 pass. Within 3-4 predicted baseline. |
+| Test Quality | 6/10 | 3/8 tests initially wrong (superposition accounting, gradient values, np.isclose API). All 3 self-corrected by Phase 5A without human intervention. |
+| Implementation Quality | 9/10 | Devstral correct or near-correct from iteration 1. Clean numpy. |
+| Orchestrator Behavior | 9/10 | Bifurcated review worked perfectly (5A caught test bugs 3x, skipped 5B each time). Partial pass tracking showed monotonic convergence (62%->62%->87%->100%). Only ding: 5A took 2 passes to fully fix tests (introduced rel_tol bug in its own correction). |
+| Agent Disambiguation | 10/10 | No agent code leaked. Pure environment class. |
+| **Total** | **42/50** | **Above 38/50 threshold.** First QIWM pass. |
+
+**Run 4b trajectory:**
+```
+Iter 1: 5/8 (62%) — 3 test bugs (superposition, gradient interior, gradient boundary)
+Iter 2: 5/8 (62%) — 5A corrected 3 test bugs, but introduced rel_tol API error
+Iter 3: 7/8 (87%) — 5A caught rel_tol -> rtol fix
+Iter 4: 8/8 (100%) — ALL TESTS PASS
+```
+
+**Run 4b vs Run 1 delta (same task, fixed orchestrator):**
+| Dimension | Run 1 | Run 4b | Delta |
+|-----------|-------|--------|-------|
+| Convergence | 0/10 | 8/10 | +8 |
+| Test Quality | 2/10 | 6/10 | +4 |
+| Implementation | 9/10 | 9/10 | 0 |
+| Orchestrator | 3/10 | 9/10 | +6 |
+| Disambiguation | 10/10 | 10/10 | 0 |
+| **Total** | **24/50** | **42/50** | **+18** |
+
+**Key insight:** Implementation quality was never the bottleneck (9/10 both runs). The +18 point improvement came entirely from orchestrator fixes: bifurcated review eliminated the review asymmetry that kept blaming correct code, and partial pass tracking provided convergence visibility. The model was right from day one; the orchestrator just couldn't see it.
+
+**Orchestrator changes between Run 1 and Run 4b:**
+- Bifurcated review: Phase 5 split into 5A (test audit against DK) + 5B (implementation diagnosis)
+- Token estimation: len//4 -> len//3 (honest constraint, compress early not late)
+- Retry resilience: 3 retries with exponential backoff on ConnectionError/Timeout
+- Partial pass tracking: Tests: N/M passed (P%) logged every iteration
+- Stuck detection: P/F pattern hash + failing-set hash (dual signal)
+- DK PING: break after fire, failing-set tracking survives cosmetic code changes
+- Dual-profile tuning: single model (Devstral 24B) with planner T=0.6, implementer T=0.4
+
+**Root cause analysis (Run 1):**
 - DK had formulas but no conceptual shape (field landscape / well topology)
 - The planner couldn't decompress formulas into correct inequality directions without the shape anchor
 - Obstacle superposition stated but not reinforced with explicit "1000 + negative != exactly 1000"
@@ -197,13 +240,15 @@ Did the models correctly treat this as a WORLD (environment) with no agent/AI lo
 - Boundary gradient formula ambiguous (divisor unspecified for forward/backward difference)
 - Stuck detection completely blind due to changing memory addresses in pytest output
 
-**Fixes applied for run 2:**
+**Fixes applied between runs:**
 - task.md: Added "CRITICAL -- Field Shape" section with explicit numeric examples and inequality direction
 - task.md: Clarified obstacle stacking ("1000.0 + negative energy contribution, which is LESS than 1000.0")
 - task.md: Changed interface to store field as self.potential (public), get_gradient reads from it
 - task.md: Specified boundary formulas explicitly with /1.0 divisor
 - task.md: Added constraint "Tests must only interact through public methods and public attributes"
 - isomoira.py: Stuck detection now hashes PASS/FAIL pattern (P/F per test line) not raw output
+- isomoira.py: Bifurcated review (Phase 5A test audit + Phase 5B implementation review)
+- isomoira.py: Token estimation len//3, retry with backoff, partial pass tracking
 
 ---
 
