@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Isomoira -- Single-model TDD orchestrator (dual-profile).
+Isomira -- Single-model TDD orchestrator (dual-profile).
 Phases A-D complete. One file. One loop. Tests decide when it's done.
 Phase B: Command sandboxing (write-path, sudo allowlist, foreground blocking).
 Uses one model (Devstral 24B) with different temperature/prompt profiles for planning vs coding.
@@ -905,21 +905,86 @@ def load_scope_files(task_text: str, workspace: Path) -> dict[str, str]:
 # MAIN ORCHESTRATOR LOOP
 # ---------------------------------------------
 
-def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
+def init_project(project_name: str):
+    """
+    Scaffold a new project directory with boilerplate steering files.
+    Creates: project_name/philosophy.md, task.md, workspace/, .gitignore
+    """
+    project_dir = Path(project_name).resolve()
+    if project_dir.exists():
+        print(f"[ERROR] Directory already exists: {project_dir}")
+        sys.exit(1)
+
+    project_dir.mkdir(parents=True)
+    (project_dir / "workspace").mkdir()
+
+    (project_dir / "philosophy.md").write_text(
+        "This project prioritises correctness over cleverness. Every function does one thing.\n"
+        "Error handling is explicit -- no silent swallowing of exceptions. Dependencies are\n"
+        "minimal: stdlib + requests + pytest. Code should be readable by one person six months\n"
+        "from now without any comments explaining \"why\" -- the structure itself should make\n"
+        "intent obvious. If a choice is between simplicity and performance, choose simplicity\n"
+        "until profiling proves otherwise.\n",
+        encoding="utf-8"
+    )
+
+    (project_dir / "task.md").write_text(
+        "# Task\n\n"
+        "[Plain language description of what needs to happen]\n\n"
+        "## Scope\n\n"
+        "[Which files/directories are in play, relative to workspace]\n\n"
+        "workspace/my_module.py\n\n"
+        "## Domain Knowledge\n\n"
+        "[CRITICAL: Front-load every fact the models need that they might fabricate.\n"
+        "API parameter ranges, library function signatures, algorithm specifics.\n"
+        "If a quantized model might guess wrong, state it here.]\n\n"
+        "## Constraints\n\n"
+        "[What the models must NOT do. Packages to avoid. Patterns to follow.]\n\n"
+        "- Dependencies: stdlib only.\n"
+        "- All public methods must have type hints.\n",
+        encoding="utf-8"
+    )
+
+    (project_dir / ".gitignore").write_text(
+        "__pycache__/\n"
+        "*.pyc\n"
+        ".pytest_cache/\n"
+        "workspace/\n"
+        "isomira.log\n",
+        encoding="utf-8"
+    )
+
+    print(f"[OK] Project initialised: {project_dir}")
+    print(f"     Edit philosophy.md and task.md, then run:")
+    print(f"     python {Path(__file__).name} --project {project_name}")
+
+
+def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", project_dir: str = None):
     """
     Main entry point. Runs the SUMMARISE -> PLAN -> IMPLEMENT -> TEST -> REVIEW loop.
+    If project_dir is given, steering files and workspace are read from that directory.
+    Otherwise falls back to the orchestrator's own directory (legacy mode).
     """
     global LOG_FILE
 
-    base_dir = Path(__file__).parent.resolve()
+    if project_dir:
+        base_dir = Path(project_dir).resolve()
+        if not base_dir.exists():
+            print(f"[ERROR] Project directory not found: {base_dir}")
+            print(f"        Run: python {Path(__file__).name} init {base_dir.name}")
+            sys.exit(1)
+    else:
+        base_dir = Path(__file__).parent.resolve()
+
     workspace = (base_dir / CONFIG["workspace"]).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
-    # Open log
-    LOG_FILE = open(base_dir / "isomoira.log", "a", encoding="utf-8")
+    # Open log in the project directory
+    LOG_FILE = open(base_dir / "isomira.log", "a", encoding="utf-8")
 
     log("=" * 60)
-    log("ISOMOIRA -- Starting")
+    log("ISOMIRA -- Starting")
+    log(f"Project:   {base_dir}")
     log(f"Workspace: {workspace}")
     log(f"Planner:   {CONFIG['planner_model']}")
     log(f"Implementer: {CONFIG['implementer_model']}")
@@ -1265,16 +1330,28 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md"):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Isomoira -- Single-model TDD orchestrator (dual-profile)")
+    parser = argparse.ArgumentParser(description="Isomira -- Single-model TDD orchestrator (dual-profile)")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- init subcommand ---
+    init_parser = subparsers.add_parser("init", help="Scaffold a new project directory")
+    init_parser.add_argument("project_name", help="Name/path for the new project directory")
+
+    # --- run flags (default when no subcommand) ---
+    parser.add_argument("--project", default=None, help="Project directory (contains task.md, philosophy.md, workspace/)")
     parser.add_argument("--task", default="task.md", help="Path to task file (default: task.md)")
     parser.add_argument("--philosophy", default="philosophy.md", help="Path to philosophy file (default: philosophy.md)")
     parser.add_argument("--workspace", default=None, help="Workspace directory (overrides CONFIG)")
     parser.add_argument("--url", default=None, help="LMStudio API URL (overrides CONFIG)")
+
     args = parser.parse_args()
 
-    if args.workspace:
-        CONFIG["workspace"] = args.workspace
-    if args.url:
-        CONFIG["lmstudio_url"] = args.url
+    if args.command == "init":
+        init_project(args.project_name)
+    else:
+        if args.workspace:
+            CONFIG["workspace"] = args.workspace
+        if args.url:
+            CONFIG["lmstudio_url"] = args.url
 
-    run(task_path=args.task, philosophy_path=args.philosophy)
+        run(task_path=args.task, philosophy_path=args.philosophy, project_dir=args.project)

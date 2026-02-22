@@ -1,6 +1,31 @@
-# Isomoira
+# Isomira
 
 A single-model orchestrator for agentic coding. Devstral plans, implements, and reviews via dual-profile tuning. Tests decide when it's done.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone into your home directory
+#    Windows: C:\Users\<you>\isomira
+#    Linux:   /home/<you>/isomira
+git clone https://github.com/brutchjd/isomira.git ~/isomira
+cd ~/isomira
+pip install requests pytest
+
+# 2. Start LMStudio with Devstral 24B on localhost:1234
+
+# 3. Create a project
+python isomira.py init myproject
+
+# 4. Edit steering files
+#    myproject/philosophy.md  -- design philosophy (5-6 sentences)
+#    myproject/task.md        -- task spec with Domain Knowledge
+
+# 5. Run
+python isomira.py --project myproject
+```
 
 ---
 
@@ -16,7 +41,7 @@ The orchestrator handles context compression, command execution sandboxing, and 
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    ISOMOIRA                          │
+│                    ISOMIRA                          │
 │                                                      │
 │  ┌──────────┐    ┌──────────┐    ┌───────────────┐  │
 │  │ task.md   │    │philosophy│    │  codebase     │  │
@@ -66,31 +91,44 @@ These are non-negotiable and should guide every implementation decision:
 
 ---
 
-## Hardware / Environment
+## Requirements
 
-- **CPU:** i3-14100F (4P + 4E = 12 threads)
-- **GPU:** RTX 4060 Ti 16GB VRAM
-- **RAM:** 64GB (assume 32GB available)
-- **Storage:** SSD
-- **OS:** WSL (Ubuntu) on Windows
-- **Model server:** LMStudio (OpenAI-compatible API, typically `http://localhost:1234/v1`)
-- **Model:** Devstral 24B (`mistralai_devstral-small-2-24b-instruct-2512`) — single model, dual-profile (planner + implementer)
+- **GPU:** 16GB+ VRAM (tested on RTX 4060 Ti 16GB)
+- **RAM:** 32GB+ available
+- **OS:** Windows (WSL) or Linux
+- **Model server:** [LMStudio](https://lmstudio.ai/) (OpenAI-compatible API at `http://localhost:1234/v1`)
+- **Model:** Devstral 24B (`mistralai_devstral-small-2-24b-instruct-2512`) -- single model, dual-profile (planner + implementer)
+- **Python:** 3.10+
+- **Dependencies:** `requests`, `pytest`
 
 ---
 
 ## File Structure
 
+The orchestrator lives in your home directory. Projects live wherever you create them.
+
 ```
-isomoira/
-├── README.md              # this file
+~/isomira/                 # orchestrator (clone once)
+├── README.md
+├── isomira.py             # single-file orchestrator
+├── requirements.txt       # requests + pytest
+├── philosophy.md          # boilerplate template
+├── task.md                # boilerplate template
+└── docs/
+
+~/myproject/               # project directory (one per project)
 ├── philosophy.md          # project steering directive (5-6 sentences)
-├── task.md                # current task specification (user-authored)
-├── isomoira.py            # main orchestrator (single file for v1)
-├── requirements.txt       # minimal deps: requests, pathlib
-└── workspace/             # default project workspace (configurable)
+├── task.md                # task spec with Domain Knowledge
+├── workspace/             # generated code lives here
+├── isomira.log            # run log (gitignored)
+└── .gitignore
 ```
 
-### v1 is a single file: `isomoira.py`
+Create project directories with `python isomira.py init myproject`. Run with `python isomira.py --project ~/myproject`.
+
+Legacy mode (no `--project` flag) uses the orchestrator's own directory for steering files, for backwards compatibility.
+
+### v1 is a single file: `isomira.py`
 
 Do not split into multiple modules prematurely. The orchestrator is a state machine with helper functions. It fits in one file until it doesn't. Refactor only when a function exceeds ~80 lines or when a clear module boundary emerges from actual use.
 
@@ -406,7 +444,7 @@ def call_model(model_name: str, system_prompt: str, user_prompt: str) -> str:
 
 ### Model Names
 
-These must match exactly what LMStudio loads. Configure in a `config` dict at the top of `isomoira.py`:
+These must match exactly what LMStudio loads. Configure in a `config` dict at the top of `isomira.py`:
 
 ```python
 CONFIG = {
@@ -469,10 +507,10 @@ Replace compressed-summary-only context with a vector store (ChromaDB or similar
 v1 only parses Python via `ast`. Extend to JS/TS via `tree-sitter` bindings. This expands the codebase summary quality for mixed-language projects.
 
 ### Session Persistence + Resume
-Write loop state (current phase, iteration count, last passing tests, compressed context) to disk after each phase. Allow `isomoira.py --resume` to pick up where it left off after a crash or intentional stop.
+Write loop state (current phase, iteration count, last passing tests, compressed context) to disk after each phase. Allow `isomira.py --resume` to pick up where it left off after a crash or intentional stop.
 
 ### Model Evaluation Harness
-Run the same task against different model/quant combinations and score outputs automatically using test pass rate. This turns Isomoira into a model benchmarking tool for your specific workflow, not just generic benchmarks.
+Run the same task against different model/quant combinations and score outputs automatically using test pass rate. This turns Isomira into a model benchmarking tool for your specific workflow, not just generic benchmarks.
 
 ### Third Model Role: Debugger
 When the implement→review loop is stuck (same failure 5+ times), hand off to a third model (or Claude via API) specifically for debugging. This model gets the failing test, the implementation, and all previous diagnoses. It only activates on stuck loops.
@@ -484,14 +522,6 @@ Auto-commit after each successful test pass. Auto-branch before each task. This 
 
 ## Philosophy on Overengineering
 
-All four build phases (A-D) are complete and validated. The orchestrator is a single file (~900 lines) containing a state machine with helper functions. Future pathway items (semantic retrieval, session persistence, third model role) remain deferred until real usage on multi-file projects demands them.
+All four build phases (A-D) are complete and validated. The orchestrator is a single file containing a state machine with helper functions. Future pathway items (semantic retrieval, session persistence, third model role) remain deferred until real usage on multi-file projects demands them.
 
 The orchestrator is a for-loop with a match statement. Keep it that way as long as possible.
-
-## Current Project: QIWM (Quantum-Inspired World Model)
-
-Active task: bio-inspired agents navigating a 2D grid using quantum-inspired field dynamics. Phases are fed to the orchestrator one at a time via task.md. See task.md for the current phase scope.
-
-This project tests architectural novelty: the Isomoira agent (orchestrator) builds a system containing agents (NanoAgents). The word "agent" creates interpretive tension that stress-tests the models' ability to disambiguate context from their own substrate.
-
-Related work: [Poetiq AI](https://poetiq.ai/) ($45.8M seed, 2026) demonstrates this same paradigm at scale -- LLMs as substrate, orchestration as intelligence. Isomoira is a minimal local instantiation of this principle.

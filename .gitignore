@@ -2,7 +2,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 workspace/
-isomoira.log
-isomoira_state.json
+isomira.log
+isomira_state.json
 *.egg-info/
 .venv/

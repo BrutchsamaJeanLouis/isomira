@@ -1,4 +1,4 @@
-# Isomoira -- Deployment Guide for New Projects
+# Isomira -- Deployment Guide for New Projects
 
 Step-by-step instructions for deploying the agentic TDD orchestrator against a new project or workspace.
 
@@ -8,7 +8,7 @@ Step-by-step instructions for deploying the agentic TDD orchestrator against a n
 
 ### 1. LMStudio running with the model loaded
 
-Open LMStudio. Ensure this model is available (name must match CONFIG in isomoira.py):
+Open LMStudio. Ensure this model is available (name must match CONFIG in isomira.py):
 
 ```
 Model:  mistralai_devstral-small-2-24b-instruct-2512  (single model, dual-profile)
@@ -36,7 +36,7 @@ That's it. The orchestrator is stdlib + these two.
 
 ### Step 1: Clean the workspace
 
-The orchestrator writes all generated code into the `workspace/` directory (relative to where `isomoira.py` lives, unless overridden with `--workspace`).
+The orchestrator writes all generated code into the `workspace/` directory (relative to where `isomira.py` lives, unless overridden with `--workspace`).
 
 For a fresh task, clean it:
 
@@ -127,39 +127,51 @@ Key rules:
 - Be specific about file paths in Scope. The orchestrator uses these to load existing file contents and feed them to the models.
 - Scope paths should be relative to the workspace root (e.g., `my_module.py` not `C:\full\path\my_module.py`). The `workspace/` prefix is optional -- the orchestrator strips it.
 
-### Step 4: Verify file layout
+### Step 4: Create project (new workflow)
 
-Before running, confirm you have:
+Instead of editing files in the orchestrator directory, create a separate project:
+
+```powershell
+cd C:\Users\brutc\isomira
+python .\isomira.py init myproject
+```
+
+This creates `myproject/` with boilerplate `philosophy.md`, `task.md`, `workspace/`, and `.gitignore`. Edit those files (Steps 2-3 above).
+
+Verify layout:
 
 ```
-isomira/
-  isomoira.py          # the orchestrator (don't touch)
+myproject/
   philosophy.md        # your project steering directive (Step 2)
   task.md              # your task specification (Step 3)
-  requirements.txt     # requests + pytest
   workspace/           # clean or containing existing project files
+  .gitignore
 ```
 
 ### Step 5: Run
 
-Basic (uses defaults):
+Using `--project` (recommended):
 
 ```powershell
 cd C:\Users\brutc\isomira
-python .\isomoira.py
+python .\isomira.py --project ..\myproject
+```
+
+Legacy mode (steering files in orchestrator directory):
+
+```powershell
+cd C:\Users\brutc\isomira
+python .\isomira.py
 ```
 
 With overrides:
 
 ```powershell
-# Point at a different workspace
-python .\isomoira.py --workspace C:\Users\brutc\my_other_project
-
 # Different task/philosophy files (for multiple tasks)
-python .\isomoira.py --task task_v2.md --philosophy philosophy_webdev.md
+python .\isomira.py --project ..\myproject --task task_v2.md --philosophy philosophy_webdev.md
 
 # Different LMStudio URL
-python .\isomoira.py --url http://192.168.1.50:1234/v1
+python .\isomira.py --url http://192.168.1.50:1234/v1
 ```
 
 All flags:
@@ -205,10 +217,10 @@ Diagnosis: ...         Planner's root-cause analysis of failures
 
 ### Log file
 
-Everything also goes to `isomoira.log` (UTF-8 encoded, append mode). Survives crashes. Check it with:
+Everything also goes to `isomira.log` (UTF-8 encoded, append mode). Survives crashes. Check it with:
 
 ```powershell
-Get-Content .\isomoira.log -Tail 50
+Get-Content .\isomira.log -Tail 50
 ```
 
 ### Inspect generated files
@@ -287,8 +299,8 @@ When the orchestrator fires a DK PING (triple beep + diagnostic in terminal), it
 6. **Clear workspace + log, rerun fresh:**
    ```powershell
    Remove-Item -Recurse -Force .\workspace\* -ErrorAction SilentlyContinue
-   "" | Set-Content .\isomoira.log
-   python .\isomoira.py
+   "" | Set-Content .\isomira.log
+   python .\isomira.py
    ```
 
 ### Gap-Finding Indicators
@@ -339,18 +351,18 @@ task_03_api_layer.md
 Run them in order. Each run builds on the workspace left by the previous one:
 
 ```powershell
-python .\isomoira.py --task task_01_data_model.md
+python .\isomira.py --task task_01_data_model.md
 # Wait for completion, verify output
-python .\isomoira.py --task task_02_parser.md
+python .\isomira.py --task task_02_parser.md
 # The workspace now has files from task 01, so task 02 can import them
-python .\isomoira.py --task task_03_api_layer.md
+python .\isomira.py --task task_03_api_layer.md
 ```
 
 You can also swap philosophy files between tasks if different modules need different design priorities:
 
 ```powershell
-python .\isomoira.py --task task_api.md --philosophy philosophy_defensive.md
-python .\isomoira.py --task task_perf.md --philosophy philosophy_fast.md
+python .\isomira.py --task task_api.md --philosophy philosophy_defensive.md
+python .\isomira.py --task task_perf.md --philosophy philosophy_fast.md
 ```
 
 ---
@@ -365,7 +377,7 @@ python .\isomoira.py --task task_perf.md --philosophy philosophy_fast.md
 [ ] task.md written with all four sections (Task, Scope, Domain Knowledge, Constraints)
 [ ] Domain Knowledge section front-loads every fact models might hallucinate
 [ ] Scope section lists exact file paths relative to workspace
-[ ] Run: python .\isomoira.py
+[ ] Run: python .\isomira.py
 [ ] Monitor console output for test pass/fail cycle
 [ ] On completion, inspect workspace/ for generated code
 ```
