@@ -1,6 +1,6 @@
 # Isomira
 
-A single-model orchestrator for agentic coding. Devstral plans, implements, and reviews via dual-profile tuning. Tests decide when it's done.
+A multi-model orchestrator for agentic coding. A reasoning model (Ministral 14B) plans and diagnoses, Devstral 24B implements and reviews via dual-profile tuning. Tests decide when it's done.
 
 ---
 
@@ -14,7 +14,9 @@ git clone https://github.com/brutchjd/isomira.git ~/isomira
 cd ~/isomira
 pip install requests pytest
 
-# 2. Start LMStudio with Devstral 24B on localhost:1234
+# 2. Start LMStudio on localhost:1234
+#    Models needed: Devstral 24B + Ministral 14B Reasoning
+#    LMStudio autoswaps between them automatically
 
 # 3. Create a project
 python isomira.py init myproject
@@ -31,7 +33,9 @@ python isomira.py --project myproject
 
 ## What This Is
 
-A Python CLI tool that runs a TDD loop using a single local LLM (Devstral 24B) served by LMStudio with dual-profile tuning. The planner profile writes tests and architectural plans. The implementer profile writes code. The loop continues until all tests pass. No human in the loop after task submission.
+A Python CLI tool that runs a TDD loop using local LLMs served by LMStudio. A Consultant Agent (Ministral 14B Reasoning) generates plans using built-in Chain-of-Thought reasoning. Devstral 24B implements code via dual-profile tuning. The loop continues until all tests pass. No human in the loop after task submission.
+
+The Consultant also steps in when the loop gets stuck, and can autonomously amend the Domain Knowledge section of `task.md` to resolve specification gaps -- eliminating most cases where the orchestrator previously halted for human intervention.
 
 The orchestrator handles context compression, command execution sandboxing, and phase handoffs. The models never touch the shell directly — the orchestrator mediates all execution.
 
@@ -57,7 +61,7 @@ The orchestrator handles context compression, command execution sandboxing, and 
 │     ┌──────────────┼──────────────┐                  │
 │     ▼              ▼              ▼                  │
 │  PLAN           IMPLEMENT      REVIEW                │
-│  (planner)     (implementer)  (planner)              │
+│  (consultant)  (implementer)  (planner/consultant)   │
 │     │              │              │                  │
 │     └──────────────┼──────────────┘                  │
 │                    │                                  │
@@ -79,7 +83,7 @@ The orchestrator handles context compression, command execution sandboxing, and 
 
 These are non-negotiable and should guide every implementation decision:
 
-1. **~20k usable context per model call.** The model is quantized. Every token of context must earn its place. The orchestrator compresses aggressively between phases.
+1. **~20k usable context per model call.** The model is quantized. Every token of context must earn its place. The orchestrator compresses aggressively between phases. **Exception:** The Consultant Agent (Ministral 14B Reasoning) operates with a 61440-token context window for deeper analysis.
 
 2. **Sequential, not parallel.** One model active at a time. One phase completes before the next begins. No concurrent model calls. LMStudio handles model swapping via its autoswap/TTL mechanism.
 
@@ -97,7 +101,7 @@ These are non-negotiable and should guide every implementation decision:
 - **RAM:** 32GB+ available
 - **OS:** Windows (WSL) or Linux
 - **Model server:** [LMStudio](https://lmstudio.ai/) (OpenAI-compatible API at `http://localhost:1234/v1`)
-- **Model:** Devstral 24B (`mistralai_devstral-small-2-24b-instruct-2512`) -- single model, dual-profile (planner + implementer)
+- **Models:** Devstral 24B (`mistralai_devstral-small-2-24b-instruct-2512`) -- implementer + review; Ministral 14B Reasoning (`mistralai_ministral-3-14b-reasoning-2512`) -- Consultant Agent (planning + stuck diagnosis + DK amendment)
 - **Python:** 3.10+
 - **Dependencies:** `requests`, `pytest`
 
@@ -201,11 +205,13 @@ inclusion.
 
 ---
 
-### Phase 2: PLAN (Devstral — planner profile)
+### Phase 2: PLAN (Consultant Agent — Ministral 14B Reasoning)
 
-**Actor:** Devstral 24B (planner profile)
+**Actor:** Ministral 14B Reasoning (consultant profile, 61440 context window)
 
-**Input context (must fit ~16k tokens total):**
+The Consultant uses built-in `<think>` blocks for Chain-of-Thought reasoning before producing the JSON plan. The orchestrator strips `<think>...</think>` blocks from the output before parsing.
+
+**Input context (up to ~61k tokens):**
 ```
 [system] philosophy.md content
 [user]   task.md content
@@ -323,9 +329,9 @@ Output ONLY file blocks and command blocks. No explanations.
 
 ---
 
-### Phase 5: REVIEW (Devstral — planner profile)
+### Phase 5: REVIEW (Devstral or Consultant when stuck)
 
-**Actor:** Devstral 24B (planner profile)
+**Actor:** Devstral 24B (planner profile) normally. When `effective_stuck >= 3`, the Consultant Agent (Ministral 14B Reasoning) takes over both Phase 5A (Test Audit) and Phase 5B (Implementation Review) with its larger context window and Chain-of-Thought reasoning.
 
 **Input context:**
 ```
@@ -361,7 +367,7 @@ Output format (same as Phase 2):
 
 **After this:** Loop back to Phase 3 (Implement) with the corrected plan. Then Phase 4 (Test). Then Phase 5 (Review) again if still failing.
 
-**The loop runs indefinitely until tests pass.** There is no max iteration count. The models figure it out or the user kills it manually. The context compression between iterations prevents context overflow from killing the loop.
+**The loop runs indefinitely until tests pass.** There is no max iteration count. When stuck (same failures for 3+ iterations), the Consultant Agent takes over review. At 5+ iterations of stuck, the Consultant attempts autonomous Domain Knowledge amendment (see Phase E below). The context compression between iterations prevents context overflow from killing the loop.
 
 ---
 
@@ -450,9 +456,11 @@ These must match exactly what LMStudio loads. Configure in a `config` dict at th
 CONFIG = {
     "planner_model": "mistralai_devstral-small-2-24b-instruct-2512",
     "implementer_model": "mistralai_devstral-small-2-24b-instruct-2512",
+    "consultant_model": "mistralai_ministral-3-14b-reasoning-2512",
     "lmstudio_url": "http://localhost:1234/v1",
     "workspace": "./workspace",
     "max_context_tokens": 16000,
+    "consultant_max_context_tokens": 61440,
     "cmd_timeout_default": 30,
     "cmd_timeout_install": 300,
 }
@@ -464,8 +472,9 @@ The orchestrator sends fixed sampling parameters per model role. These are not c
 
 **Planner profile:** `temperature: 0.6, top_p: 0.95, min_p: 0.05, repeat_penalty: 1.05`
 **Implementer profile:** `temperature: 0.4, top_p: 0.85, min_p: 0.05, repeat_penalty: 1.05`
+**Consultant profile:** `temperature: 0.3, top_p: 0.9, min_p: 0.05, repeat_penalty: 1.05, max_tokens: 8192`
 
-Same model, different tuning. The planner profile runs hotter for broader test exploration. The implementer profile runs tighter for precise code generation. See `docs/singleModel.md` for the full dual-profile spec.
+The planner profile runs hotter for broader test exploration. The implementer profile runs tighter for precise code generation. The consultant profile runs cool (T=0.3) because the reasoning model already has internal Chain-of-Thought via `<think>` blocks; it needs `max_tokens: 8192` because the think block consumes output tokens before the actual JSON response.
 
 ---
 
@@ -486,6 +495,10 @@ Token estimation (len//4), context truncation, re-anchoring (philosophy.md + tas
 ### Phase D: Robustness -- COMPLETE
 
 normalize_plan() handles wildly varying model schemas (10+ key aliases, regex .py scanning, fallback_file inference). Test protection guardrail (count_test_functions rejects review updates that shrink the suite). Stuck loop detection via MD5 hash of test output. Review-to-implementation feedback pipeline: diagnosis + test failures + code corrections (extract_review_code) wired into Devstral context. UTF-8 logging, Windows cp1252 safe console output.
+
+### Phase E: Consultant Agent -- COMPLETE
+
+Dedicated reasoning model (Ministral 14B, `mistralai_ministral-3-14b-reasoning-2512`) with 61440-token context window. Three integration points: (1) Phase 2 PLAN -- Consultant generates all plans using built-in `<think>` Chain-of-Thought, replacing Devstral as planner; (2) Phase 5 stuck takeover -- when `effective_stuck >= 3`, Consultant takes over Test Audit (5A) and Implementation Review (5B) with deeper reasoning; (3) DK PING autonomous amendment -- when `effective_stuck >= 5`, instead of halting, Consultant diagnoses the Domain Knowledge gap and proposes append-only amendments to `task.md` (500-char cap per addition, total +2000 char growth cap, confidence gate, `[Auto-DK iteration N]` tagging). On successful DK amendment, stuck counters reset and the Consultant re-plans. `strip_think_blocks()` utility strips `<think>...</think>` from all Consultant output before JSON parsing.
 
 ### Validation History
 
@@ -512,8 +525,8 @@ Write loop state (current phase, iteration count, last passing tests, compressed
 ### Model Evaluation Harness
 Run the same task against different model/quant combinations and score outputs automatically using test pass rate. This turns Isomira into a model benchmarking tool for your specific workflow, not just generic benchmarks.
 
-### Third Model Role: Debugger
-When the implement→review loop is stuck (same failure 5+ times), hand off to a third model (or Claude via API) specifically for debugging. This model gets the failing test, the implementation, and all previous diagnoses. It only activates on stuck loops.
+### ~~Third Model Role: Debugger~~ — SUPERSEDED by Phase E (Consultant Agent)
+The Consultant Agent (Ministral 14B Reasoning) now fills this role. It takes over review at stuck count 3 and attempts autonomous DK amendment at stuck count 5. A Claude-via-API escalation path remains a future option for cases where the Consultant also fails.
 
 ### Workspace Git Integration
 Auto-commit after each successful test pass. Auto-branch before each task. This gives you rollback and diff visibility without the models needing to manage git.
@@ -522,6 +535,6 @@ Auto-commit after each successful test pass. Auto-branch before each task. This 
 
 ## Philosophy on Overengineering
 
-All four build phases (A-D) are complete and validated. The orchestrator is a single file containing a state machine with helper functions. Future pathway items (semantic retrieval, session persistence, third model role) remain deferred until real usage on multi-file projects demands them.
+All five build phases (A-E) are complete and validated. The orchestrator is a single file containing a state machine with helper functions. Future pathway items (semantic retrieval, session persistence, Claude API escalation) remain deferred until real usage on multi-file projects demands them.
 
 The orchestrator is a for-loop with a match statement. Keep it that way as long as possible.

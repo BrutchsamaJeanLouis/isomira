@@ -44,9 +44,11 @@ __all__ = [
 CONFIG = {
     "planner_model": "mistralai_devstral-small-2-24b-instruct-2512",
     "implementer_model": "mistralai_devstral-small-2-24b-instruct-2512",
+    "consultant_model": "mistralai_ministral-3-14b-reasoning-2512",
     "lmstudio_url": "http://localhost:1234/v1",
     "workspace": "./workspace",
     "max_context_tokens": 16000,
+    "consultant_max_context_tokens": 61440,
     "cmd_timeout_default": 30,
     "cmd_timeout_install": 300,
 }
@@ -80,6 +82,14 @@ PROFILES = {
         "repeat_penalty": 1.05,
         "max_tokens": 4096,
     },
+    "consultant": {
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "top_k": 0,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "max_tokens": 8192,
+    },
 }
 
 # ---------------------------------------------
@@ -90,6 +100,13 @@ def estimate_tokens(text: str) -> int:
     """Rough token count. ~3 chars per token for code-heavy content.
     Biased toward overcounting (compress early, not late)."""
     return len(text) // 3
+
+
+def strip_think_blocks(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks from model output.
+    Reasoning models (Ministral) emit chain-of-thought in <think> tags
+    before the actual response. Strip these before parsing JSON."""
+    return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 # ---------------------------------------------
@@ -988,6 +1005,8 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
     log(f"Workspace: {workspace}")
     log(f"Planner:   {CONFIG['planner_model']}")
     log(f"Implementer: {CONFIG['implementer_model']}")
+    log(f"Consultant:  {CONFIG['consultant_model']}")
+    log(f"Consultant ctx: {CONFIG['consultant_max_context_tokens']}")
     log("=" * 60)
 
     # Load steering files
@@ -1012,10 +1031,16 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
     if scope_files:
         log(f"Loaded {len(scope_files)} scope files")
 
-    # -- PHASE 2: PLAN --
-    log("\n--- PHASE 2: PLAN ---")
-    sys_prompt, usr_prompt = assemble_plan_context(philosophy, task, codebase_summary, scope_files)
-    plan_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt, profile="planner")
+    # -- PHASE 2: PLAN (Consultant) --
+    log("\n--- PHASE 2: PLAN (Consultant) ---")
+    _saved_ctx = CONFIG["max_context_tokens"]
+    CONFIG["max_context_tokens"] = CONFIG["consultant_max_context_tokens"]
+    try:
+        sys_prompt, usr_prompt = assemble_plan_context(philosophy, task, codebase_summary, scope_files)
+    finally:
+        CONFIG["max_context_tokens"] = _saved_ctx
+    plan_output = call_model(CONFIG["consultant_model"], sys_prompt, usr_prompt, profile="consultant")
+    plan_output = strip_think_blocks(plan_output)
 
     try:
         plan_data = parse_json_output(plan_output)
@@ -1183,69 +1208,206 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
             log(f"STUCK LOOP DETECTED: effective stuck score {effective_stuck} "
                 f"(pf_repeat={stuck_count}, failing_set_repeat={failing_set_count})")
 
-        # -- DK PING: detect probable Domain Knowledge gap --
+        # -- DK PING: Consultant autonomous DK amendment --
         # Signal: same tests keep failing for DK_PING_THRESHOLD iterations.
-        # Whether Devstral tweaks whitespace or not is irrelevant -- if the
-        # same failures persist, the problem is upstream in the spec.
-        # ACTION: log, beep, HALT. No point burning tokens on a spec problem.
+        # Instead of halting, give the Consultant one chance to diagnose the
+        # Domain Knowledge gap and propose an append-only amendment to task.md.
         if effective_stuck >= DK_PING_THRESHOLD:
+            log(f"\n{'!' * 60}")
+            log(f"DK PING: Consultant attempting autonomous DK amendment")
+            log(f"  Effective stuck score: {effective_stuck} "
+                f"(pf={stuck_count}, failing_set={failing_set_count})")
+            log(f"{'!' * 60}")
+
+            # Read current task.md and record original size for cap
+            task_path_full = base_dir / task_path
+            current_task = read_file_safe(task_path_full)
+            original_task_size = len(current_task)
+            TASK_SIZE_CAP = original_task_size + 2000
+
+            # Build failing test context
             failing_tests = [l.strip() for l in test_result["output"].split("\n")
-                             if "FAILED" in l and "::" in l and "short test" not in l]
-            # Extract assertion lines for gap-finding clues
+                             if "FAILED" in l and "::" in l]
             assert_lines = [l.strip() for l in test_result["output"].split("\n")
                             if l.strip().startswith("E ") and ("assert" in l.lower()
                             or "!=" in l or "==" in l or "<" in l or ">" in l)]
-            ping_msg = (
-                f"\n{'!' * 60}\n"
-                f"DK PING: Probable Domain Knowledge gap detected.\n"
-                f"  Effective stuck score: {effective_stuck} "
-                f"(pf={stuck_count}, failing_set={failing_set_count})\n"
-                f"  Implementation unchanged for {impl_stable_count} iterations.\n"
-                f"\n"
-                f"  FAILING TESTS:\n"
-            )
-            for ft in failing_tests[:5]:
-                ping_msg += f"    {ft}\n"
-            if assert_lines:
-                ping_msg += f"\n  ASSERTION CLUES (what the test expected vs got):\n"
-                for al in assert_lines[:8]:
-                    ping_msg += f"    {al}\n"
-            ping_msg += (
-                f"\n"
-                f"  ACTION REQUIRED -- human DK review:\n"
-                f"  1. Read the failing test names above\n"
-                f"  2. Open test file in workspace/ and trace the assertion\n"
-                f"  3. Open task.md Domain Knowledge and find the gap\n"
-                f"  4. Fix task.md (add missing fact or resolve ambiguity)\n"
-                f"  5. Clear workspace + log, rerun fresh\n"
-                f"\n"
-                f"  GAP-FINDING INDICATORS:\n"
-                f"  - Reversed comparison? (< vs >) Check if DK specifies\n"
-                f"    which direction values increase/decrease\n"
-                f"  - Value slightly off? (999.5 vs 1000) Check if DK\n"
-                f"    explains how multiple effects combine (superposition)\n"
-                f"  - Wrong at boundary? Check if DK has explicit formulas\n"
-                f"    for edge/corner cases, not just interior\n"
-                f"  - Test uses internal state? (_var) Check if DK specifies\n"
-                f"    the public interface contract\n"
-                f"\n"
-                f"  HALTING -- fix task.md and rerun.\n"
-                f"{'!' * 60}"
-            )
-            log(ping_msg)
-            print("\a\a\a", end="", flush=True)  # triple beep = DK ping
-            break  # HALT: don't burn tokens on a spec problem
+
+            # Reload implementation for full diagnostic context
+            dk_impl_files = {}
+            for entry in plan:
+                fpath = workspace / entry["file"]
+                if fpath.exists():
+                    dk_impl_files[entry["file"]] = fpath.read_text(errors="ignore")
+
+            dk_system = f"""{philosophy}
+
+You are a diagnostic consultant. The TDD loop has been stuck for {effective_stuck}
+iterations on the same failing tests. The implementation model cannot fix this.
+
+Your job: analyse the failing tests, the implementation, and the Domain Knowledge
+section of task.md. Identify what FACT is missing or ambiguous in Domain Knowledge
+that causes the implementation to fail.
+
+Output format:
+{{
+  "diagnosis": "What specific DK gap causes the failure",
+  "dk_addition": "Exact text to APPEND to the Domain Knowledge section. Be precise and factual. Include formulas, ranges, or API details as needed.",
+  "confidence": "high|medium|low"
+}}
+
+RULES:
+- You may ONLY propose ADDITIONS to Domain Knowledge. Never delete or modify existing text.
+- Keep dk_addition under 500 characters. Be surgical.
+- If you cannot identify the gap with high/medium confidence, set dk_addition to empty string.
+- Output ONLY the JSON object. No markdown fences. No preamble."""
+
+            dk_user_parts = [
+                current_task,
+                "---\n## Failing Tests\n" + "\n".join(failing_tests[:10]),
+                "---\n## Assertion Clues\n" + "\n".join(assert_lines[:10]),
+                "---\n## Test Output\n```\n" + test_result["output"][:6000] + "\n```",
+            ]
+            if dk_impl_files:
+                dk_user_parts.append("---\n## Current Implementation")
+                for path, content in dk_impl_files.items():
+                    dk_user_parts.append(f"\n### {path}\n```\n{content}\n```")
+
+            dk_user = "\n\n".join(dk_user_parts)
+            dk_user = truncate_context(dk_user,
+                CONFIG["consultant_max_context_tokens"] - estimate_tokens(dk_system) - 500)
+
+            dk_output = call_model(CONFIG["consultant_model"], dk_system, dk_user, profile="consultant")
+            dk_output = strip_think_blocks(dk_output)
+
+            try:
+                dk_data = parse_json_output(dk_output)
+            except ValueError as e:
+                log(f"Consultant DK analysis unparseable: {e}")
+                log("HALTING -- manual DK review required.")
+                print("\a\a\a", end="", flush=True)
+                break
+
+            dk_diagnosis = dk_data.get("diagnosis", "")
+            dk_addition = dk_data.get("dk_addition", "")
+            dk_confidence = dk_data.get("confidence", "low")
+
+            log(f"Consultant diagnosis: {dk_diagnosis}")
+            log(f"Confidence: {dk_confidence}")
+
+            if dk_addition and dk_confidence in ("high", "medium"):
+                dk_addition = dk_addition.strip()
+                if len(dk_addition) > 500:
+                    dk_addition = dk_addition[:500]
+                    log("WARNING: Truncated DK addition to 500 chars")
+
+                # Append-only insertion into Domain Knowledge section
+                proposed_task = current_task
+                dk_section_match = re.search(r"(## Domain Knowledge\s*\n)", proposed_task)
+                if dk_section_match:
+                    insert_pos = dk_section_match.end()
+                    next_section = re.search(r"\n## ", proposed_task[insert_pos:])
+                    dk_end = insert_pos + next_section.start() if next_section else len(proposed_task)
+                    proposed_task = (
+                        proposed_task[:dk_end].rstrip()
+                        + "\n\n"
+                        + f"[Auto-DK iteration {iteration}] {dk_addition}\n"
+                        + proposed_task[dk_end:]
+                    )
+                else:
+                    proposed_task += f"\n\n## Domain Knowledge\n\n[Auto-DK iteration {iteration}] {dk_addition}\n"
+
+                # Size cap: prevent unbounded task.md growth
+                if len(proposed_task) > TASK_SIZE_CAP:
+                    log(f"REJECTED DK amendment: would exceed size cap "
+                        f"({len(proposed_task)} > {TASK_SIZE_CAP})")
+                    log("HALTING -- manual DK review required.")
+                    print("\a\a\a", end="", flush=True)
+                    break
+
+                # Write amended task.md
+                task_path_full.write_text(proposed_task, encoding="utf-8")
+                task = proposed_task
+                log(f"DK AMENDED: +{len(dk_addition)} chars to Domain Knowledge")
+                log(f"  Addition: {dk_addition[:200]}")
+
+                # Reset stuck counters for fair trial with new DK
+                stuck_count = 0
+                failing_set_count = 0
+                last_test_hash = None
+                last_failing_set = None
+
+                # Re-plan with amended DK (Consultant re-plans)
+                log("\n--- RE-PLANNING with amended DK ---")
+                codebase_summary = summarise_codebase(workspace)
+                scope_files = load_scope_files(task, workspace)
+
+                _saved_ctx = CONFIG["max_context_tokens"]
+                CONFIG["max_context_tokens"] = CONFIG["consultant_max_context_tokens"]
+                try:
+                    sys_prompt, usr_prompt = assemble_plan_context(
+                        philosophy, task, codebase_summary, scope_files)
+                finally:
+                    CONFIG["max_context_tokens"] = _saved_ctx
+
+                plan_output = call_model(CONFIG["consultant_model"], sys_prompt, usr_prompt, profile="consultant")
+                plan_output = strip_think_blocks(plan_output)
+
+                try:
+                    plan_data = parse_json_output(plan_output)
+                except ValueError:
+                    log("Re-plan failed to parse. Continuing with old plan.")
+                    continue
+
+                if "plan" in plan_data:
+                    new_plan = normalize_plan(plan_data["plan"])
+                    if new_plan:
+                        plan = new_plan
+                        log(f"Re-planned: {len(plan)} entries")
+
+                if "tests" in plan_data and plan_data["tests"].get("content"):
+                    proposed_content = plan_data["tests"]["content"]
+                    proposed_count = count_test_functions(proposed_content)
+                    if proposed_count >= original_test_count:
+                        test_filename = plan_data["tests"].get("filename", test_filename)
+                        test_content = proposed_content
+                        (workspace / test_filename).write_text(test_content)
+                        original_test_count = proposed_count
+                        log(f"Re-plan updated tests: {proposed_count} functions")
+
+                continue  # Loop continues with amended DK + new plan
+
+            else:
+                log(f"Consultant could not identify DK gap (confidence={dk_confidence})")
+                log("HALTING -- manual DK review required.")
+                print("\a\a\a", end="", flush=True)
+                break
 
         # -- PHASE 5A: TEST AUDIT --
-        log("\n--- PHASE 5A: TEST AUDIT ---")
+        # Consultant steps in when stuck for deeper reasoning
+        if effective_stuck >= STUCK_THRESHOLD:
+            audit_model = CONFIG["consultant_model"]
+            audit_profile = "consultant"
+            log("\n--- PHASE 5A: TEST AUDIT (Consultant -- stuck) ---")
+        else:
+            audit_model = CONFIG["planner_model"]
+            audit_profile = "planner"
+            log("\n--- PHASE 5A: TEST AUDIT ---")
 
         # Re-read test content (may have been updated in a previous review)
         test_content = (workspace / test_filename).read_text(errors="ignore")
 
-        sys_prompt, usr_prompt = assemble_test_audit_context(
-            philosophy, task, test_content, test_result["output"]
-        )
-        audit_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt, profile="planner")
+        _saved_ctx = CONFIG["max_context_tokens"]
+        if audit_model == CONFIG["consultant_model"]:
+            CONFIG["max_context_tokens"] = CONFIG["consultant_max_context_tokens"]
+        try:
+            sys_prompt, usr_prompt = assemble_test_audit_context(
+                philosophy, task, test_content, test_result["output"]
+            )
+        finally:
+            CONFIG["max_context_tokens"] = _saved_ctx
+        audit_output = call_model(audit_model, sys_prompt, usr_prompt, profile=audit_profile)
+        if audit_model == CONFIG["consultant_model"]:
+            audit_output = strip_think_blocks(audit_output)
 
         try:
             audit_data = parse_json_output(audit_output)
@@ -1279,7 +1441,15 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
                     f"original {original_test_count}. Keeping original.")
 
         # -- PHASE 5B: IMPLEMENTATION REVIEW --
-        log("\n--- PHASE 5B: IMPLEMENTATION REVIEW ---")
+        # Consultant steps in when stuck for deeper reasoning
+        if effective_stuck >= STUCK_THRESHOLD:
+            review_model = CONFIG["consultant_model"]
+            review_profile = "consultant"
+            log("\n--- PHASE 5B: IMPLEMENTATION REVIEW (Consultant -- stuck) ---")
+        else:
+            review_model = CONFIG["planner_model"]
+            review_profile = "planner"
+            log("\n--- PHASE 5B: IMPLEMENTATION REVIEW ---")
 
         # Reload implementation files
         impl_files = {}
@@ -1288,10 +1458,18 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
             if fpath.exists():
                 impl_files[block["path"]] = fpath.read_text(errors="ignore")
 
-        sys_prompt, usr_prompt = assemble_review_context(
-            philosophy, task, test_content, test_result["output"], impl_files
-        )
-        review_output = call_model(CONFIG["planner_model"], sys_prompt, usr_prompt, profile="planner")
+        _saved_ctx = CONFIG["max_context_tokens"]
+        if review_model == CONFIG["consultant_model"]:
+            CONFIG["max_context_tokens"] = CONFIG["consultant_max_context_tokens"]
+        try:
+            sys_prompt, usr_prompt = assemble_review_context(
+                philosophy, task, test_content, test_result["output"], impl_files
+            )
+        finally:
+            CONFIG["max_context_tokens"] = _saved_ctx
+        review_output = call_model(review_model, sys_prompt, usr_prompt, profile=review_profile)
+        if review_model == CONFIG["consultant_model"]:
+            review_output = strip_think_blocks(review_output)
 
         try:
             review_data = parse_json_output(review_output)
