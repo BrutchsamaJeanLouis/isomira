@@ -976,7 +976,8 @@ def init_project(project_name: str):
     print(f"     python {Path(__file__).name} --project {project_name}")
 
 
-def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", project_dir: str = None):
+def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md",
+        project_dir: str = None, min_iterations: int = 2):
     """
     Main entry point. Runs the SUMMARISE -> PLAN -> IMPLEMENT -> TEST -> REVIEW loop.
     If project_dir is given, steering files and workspace are read from that directory.
@@ -1070,6 +1071,7 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
 
     # -- LOOP: IMPLEMENT -> TEST -> REVIEW --
     iteration = 0
+    plan_generation = 1             # diagnostic: which plan are we on
     last_test_hash = None
     stuck_count = 0
     last_diagnosis = ""
@@ -1081,10 +1083,12 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
     test_result = {"passed": False, "output": ""}
     STUCK_THRESHOLD = 3
     DK_PING_THRESHOLD = 5  # cumulative stuck iterations before DK ping + halt
+    MIN_ITERATIONS = max(min_iterations, 1)  # at least 1
+    log(f"Min iterations before exit: {MIN_ITERATIONS}")
     while True:
         iteration += 1
         log(f"\n{'=' * 40}")
-        log(f"ITERATION {iteration}")
+        log(f"ITERATION {iteration} (plan gen {plan_generation})")
         log(f"{'=' * 40}")
 
         # -- PHASE 3: IMPLEMENT --
@@ -1160,12 +1164,16 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md", proj
         else:
             log(f"Tests passed: {test_result['passed']}")
 
-        if test_result["passed"]:
+        if test_result["passed"] and iteration >= MIN_ITERATIONS:
             log("\n" + "=" * 60)
             log("ALL TESTS PASS -- TASK COMPLETE")
+            log(f"  Completed in {iteration} iterations (plan gen {plan_generation})")
             log("=" * 60)
             print("\a", end="", flush=True)  # beep
             break
+        elif test_result["passed"] and iteration < MIN_ITERATIONS:
+            log(f"Tests pass but iteration {iteration}/{MIN_ITERATIONS} "
+                f"-- minimum not reached, continuing")
 
         # Show full test output in log (truncated for console readability)
         log(f"Test output:\n{test_result['output'][:4000]}")
@@ -1335,9 +1343,10 @@ RULES:
                 failing_set_count = 0
                 last_test_hash = None
                 last_failing_set = None
+                plan_generation += 1
 
                 # Re-plan with amended DK (Consultant re-plans)
-                log("\n--- RE-PLANNING with amended DK ---")
+                log(f"\n--- RE-PLANNING with amended DK (plan gen {plan_generation}) ---")
                 codebase_summary = summarise_codebase(workspace)
                 scope_files = load_scope_files(task, workspace)
 
@@ -1521,6 +1530,8 @@ if __name__ == "__main__":
     parser.add_argument("--philosophy", default="philosophy.md", help="Path to philosophy file (default: philosophy.md)")
     parser.add_argument("--workspace", default=None, help="Workspace directory (overrides CONFIG)")
     parser.add_argument("--url", default=None, help="LMStudio API URL (overrides CONFIG)")
+    parser.add_argument("--min-iterations", type=int, default=2,
+                        help="Minimum iterations before exit is allowed (default: 2)")
 
     args = parser.parse_args()
 
@@ -1532,4 +1543,5 @@ if __name__ == "__main__":
         if args.url:
             CONFIG["lmstudio_url"] = args.url
 
-        run(task_path=args.task, philosophy_path=args.philosophy, project_dir=args.project)
+        run(task_path=args.task, philosophy_path=args.philosophy,
+            project_dir=args.project, min_iterations=args.min_iterations)

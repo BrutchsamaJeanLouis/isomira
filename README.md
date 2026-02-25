@@ -27,6 +27,9 @@ python isomira.py init myproject
 
 # 5. Run
 python isomira.py --project myproject
+
+# Optional: force more iterations before exit (default: 2)
+python isomira.py --project myproject --min-iterations 4
 ```
 
 ---
@@ -129,6 +132,26 @@ The orchestrator lives in your home directory. Projects live wherever you create
 ```
 
 Create project directories with `python isomira.py init myproject`. Run with `python isomira.py --project ~/myproject`.
+
+**CLI flags:**
+- `--project <dir>` — project directory
+- `--min-iterations <N>` — minimum iterations before exit is allowed (default: 2). Prevents premature exit when tests pass before implementation runs.
+
+**`--min-iterations` guidance:**
+
+LLMs will claim "done" before work is actually complete. The `--min-iterations` flag forces the loop to keep cycling regardless of test results until the minimum is reached. Use the table below to pick a value based on task scope.
+
+Each iteration is roughly: IMPLEMENT (~4096 output tokens) + TEST + REVIEW (~2048 output tokens).
+
+| Task scope | Dev equivalent | `--min-iterations` | ~Time at 20 tok/s (local) | ~Time at 60 tok/s (cloud) |
+|---|---|---|---|---|
+| Minor refactor | 1 day | `3` | ~18 min | ~6 min |
+| Feature update | 1 week | `6` | ~36 min | ~12 min |
+| Full project (oneshot) | 2 months | `12` | ~72 min | ~24 min |
+
+These are floors, not ceilings. The loop continues past `--min-iterations` if tests are still failing. The flag only prevents *early exit* when tests pass before the implementation is actually complete.
+
+For full projects, expect DK PING to fire at least once (stuck at iteration ~5), which triggers a re-plan. The `--min-iterations` is global — after a DK re-plan at iteration 8, `iteration >= 12` still requires 4 more cycles, giving the new plan a fair trial.
 
 Legacy mode (no `--project` flag) uses the orchestrator's own directory for steering files, for backwards compatibility.
 
@@ -323,7 +346,9 @@ Output ONLY file blocks and command blocks. No explanations.
 2. Run: `pytest test_<module>.py -v --tb=short 2>&1`
 3. Capture full output.
 
-**If all tests pass:** DONE. Exit the loop. Print summary. Beep.
+**If all tests pass AND `iteration >= --min-iterations` (default 2):** DONE. Exit the loop. Print summary. Beep.
+
+**If all tests pass but `iteration < --min-iterations`:** Log "minimum not reached, continuing" and proceed to Phase 5 (Review) as if tests failed. This ensures the implementer runs at least once before the loop can exit.
 
 **If tests fail:** Continue to Phase 5 (Review).
 
