@@ -1220,7 +1220,11 @@ def run(task_path: str = "task.md", philosophy_path: str = "philosophy.md",
         # Signal: same tests keep failing for DK_PING_THRESHOLD iterations.
         # Instead of halting, give the Consultant one chance to diagnose the
         # Domain Knowledge gap and propose an append-only amendment to task.md.
-        if effective_stuck >= DK_PING_THRESHOLD:
+        # Guard: only fire when tests are actually failing. If tests pass but
+        # exit is blocked by --min-iterations, the stuck counter rises on
+        # identical P/F hashes (all-pass). Without this guard, the Consultant
+        # would "diagnose" working code and inject speculative DK amendments.
+        if effective_stuck >= DK_PING_THRESHOLD and not test_result["passed"]:
             log(f"\n{'!' * 60}")
             log(f"DK PING: Consultant attempting autonomous DK amendment")
             log(f"  Effective stuck score: {effective_stuck} "
