@@ -53,6 +53,10 @@ CONFIG = {
     "cmd_timeout_install": 300,
 }
 
+# Maximum seconds to wait for a single LMStudio API response.
+# Covers model-swap latency: request proceeds as soon as response arrives.
+REQUEST_TIMEOUT = 300  # 5 minutes
+
 # Dual-profile tuning: same model, different sampling parameters.
 # Planner profile runs hotter for broader test/plan exploration.
 # Implementer profile runs tighter for precise code generation.
@@ -143,7 +147,7 @@ def call_model(model_name: str, system_prompt: str, user_prompt: str,
     last_err = None
     for attempt in range(4):  # 1 initial + 3 retries
         try:
-            response = requests.post(url, json=payload, timeout=300)
+            response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
             log(f"  <- Got {estimate_tokens(content)} est. tokens back")
